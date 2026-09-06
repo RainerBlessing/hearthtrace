@@ -41,3 +41,17 @@ def test_load_config_wraps_missing_logs_dir_key_as_config_error(tmp_path: Path) 
 
     with pytest.raises(ConfigError):
         load_config(config_path)
+
+
+def test_load_config_wraps_wrong_typed_value_as_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    # A syntactically valid TOML file, but `export_dir` is a bare TOML date
+    # literal rather than a string -- Path(...) would otherwise raise an
+    # unhandled TypeError instead of a clean, user-facing ConfigError.
+    config_path.write_text(
+        'logs_dir = "/mnt/F/Programme/Hearthstone/Logs"\n'
+        "export_dir = 2026-09-06\n"
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)

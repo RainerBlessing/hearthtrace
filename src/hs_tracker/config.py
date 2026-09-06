@@ -51,6 +51,13 @@ def load_config(path: Path) -> Config:
     except KeyError as e:
         raise ConfigError(f"config.toml fehlt den Eintrag '{e.args[0]}'") from e
 
+    for key, value in (("logs_dir", logs_dir), ("export_dir", export_dir)):
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"config.toml: Eintrag '{key}' muss eine Zeichenkette (String) sein, "
+                f"ist aber {type(value).__name__} ({value!r})"
+            )
+
     return Config(
         logs_dir=Path(logs_dir).expanduser(),
         export_dir=Path(export_dir).expanduser(),
