@@ -25,3 +25,19 @@ def test_load_config_creates_template_when_missing(tmp_path: Path) -> None:
         load_config(config_path)
 
     assert config_path.exists()
+
+
+def test_load_config_wraps_invalid_toml_syntax_as_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("this is not = valid [ toml")
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
+def test_load_config_wraps_missing_logs_dir_key_as_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('export_dir = "/home/rainer/HearthstoneAnalysis"\n')
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)

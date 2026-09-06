@@ -35,10 +35,23 @@ def load_config(path: Path) -> Config:
         path.write_text(_TEMPLATE)
         raise ConfigError(f"Config template created at {path} — please fill in logs_dir")
 
-    with path.open("rb") as f:
-        data = tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Fehlerhafte config.toml: {e}") from e
+
+    try:
+        logs_dir = data["logs_dir"]
+    except KeyError as e:
+        raise ConfigError(f"config.toml fehlt den Eintrag '{e.args[0]}'") from e
+
+    try:
+        export_dir = data["export_dir"]
+    except KeyError as e:
+        raise ConfigError(f"config.toml fehlt den Eintrag '{e.args[0]}'") from e
 
     return Config(
-        logs_dir=Path(data["logs_dir"]).expanduser(),
-        export_dir=Path(data["export_dir"]).expanduser(),
+        logs_dir=Path(logs_dir).expanduser(),
+        export_dir=Path(export_dir).expanduser(),
     )
