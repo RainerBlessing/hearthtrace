@@ -1,6 +1,7 @@
 """Render a `ParsedGame` as a Markdown match summary."""
 
 from datetime import datetime
+from pathlib import Path
 
 from hs_tracker.parser import ParsedGame
 
@@ -26,3 +27,13 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
     for i, event in enumerate(game.turn_log, start=1):
         lines.append(f"{i}. Zug {event.turn} — **{event.player_name}:** {event.card_name} gespielt")
     return "\n".join(lines) + "\n"
+
+
+def export_match_summary(game: ParsedGame, export_dir: Path, when: datetime | None = None) -> Path:
+    """Render `game` and write it to `export_dir`, returning the file path."""
+    when = when or datetime.now()
+    export_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{when.strftime('%Y-%m-%d_%H-%M-%S')}_{game.result}.md"
+    path = export_dir / filename
+    path.write_text(render_match_summary(game, when=when))
+    return path
