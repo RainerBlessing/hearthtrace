@@ -17,6 +17,14 @@ from hslog.export import EntityTreeExporter, FriendlyPlayerExporter
 from hslog.player import coerce_to_entity_id
 
 
+class NoGameFoundError(Exception):
+    """Raised when a Power.log contains no CREATE_GAME block.
+
+    This happens for a log captured before any match started, or a
+    truncated/corrupted capture -- there is simply no game data to parse.
+    """
+
+
 @dataclass
 class PlayEvent:
     turn: int
@@ -139,6 +147,8 @@ def parse_log(path: Path) -> ParsedGame:
     with path.open() as f:
         parser.read(f)
 
+    if not parser.games:
+        raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
     packet_tree = parser.games[-1]
     exporter = EntityTreeExporter(packet_tree, player_manager=parser.player_manager)
     exporter.export()

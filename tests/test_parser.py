@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from hs_tracker.parser import parse_log
+import pytest
+
+from hs_tracker.parser import NoGameFoundError, parse_log
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_match.power.log"
 
@@ -33,3 +35,18 @@ def test_parse_log_extracts_first_play_event() -> None:
     assert first.turn == 2
     assert first.player_name == "Gastwirt"
     assert first.card_name == "Elven Archer"
+
+
+def test_parse_log_raises_no_game_found_error_when_log_has_no_create_game(
+    tmp_path: Path,
+) -> None:
+    log_without_a_game = tmp_path / "Power.log"
+    # A couple of harmless lines that never include a CREATE_GAME block --
+    # e.g. a log captured before any match started, or a truncated capture.
+    log_without_a_game.write_text(
+        "D 12:00:00.0000000 GameState.DebugPrintPower() - "
+        "TAG_CHANGE Entity=GameEntity tag=STATE value=RUNNING\n"
+    )
+
+    with pytest.raises(NoGameFoundError):
+        parse_log(log_without_a_game)
