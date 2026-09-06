@@ -8,6 +8,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from hearthstone.cardxml import load as load_cards  # noqa: E402
 
 from hs_tracker.config import Config  # noqa: E402
 from hs_tracker.deck_state import remaining_deck  # noqa: E402
@@ -37,6 +38,10 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._last_log_path: Path | None = None
         self._last_log_mtime: float | None = None
         self._last_exported_key: str | None = None
+        # Loaded once here rather than per poll tick: it's a static XML
+        # dataset (the same one parser.py/markdown_export.py load), so
+        # re-loading it every 2s would be pure waste.
+        self._card_db, _ = load_cards()
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(Adw.HeaderBar())
@@ -113,7 +118,9 @@ class TrackerWindow(Adw.ApplicationWindow):
         while (row := self._deck_list.get_row_at_index(0)) is not None:
             self._deck_list.remove(row)
         for card_id in remaining_deck(game):
-            self._deck_list.append(Gtk.Label(label=card_id, xalign=0))
+            card = self._card_db.get(card_id)
+            card_name = card.name if card else card_id
+            self._deck_list.append(Gtk.Label(label=card_name, xalign=0))
 
     def _maybe_export(self, game: ParsedGame) -> None:
         """Export a Markdown summary once per finished match.
