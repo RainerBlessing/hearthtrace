@@ -27,7 +27,45 @@ class LogWatcher:
         if latest != self._current_path:
             self._current_path = latest
             self._offset = 0
-        with self._current_path.open() as f:
+
+        try:
+            new_bytes = self._read_new_bytes()
+        except FileNotFoundError:
+            # The file existed a moment ago but vanished before we could
+            # open it (e.g. concurrent session-rotation cleanup). The next
+            # poll() will pick up whatever session exists then.
+            return
+
+        yield from self._complete_lines(new_bytes)
+
+    def _read_new_bytes(self) -> bytes:
+        """Read the file's growth since the last poll, in bytes.
+
+        Byte offsets (rather than text-mode offsets) let us reliably detect
+        truncation by comparing against the file's current size, and let us
+        find line boundaries without depending on decoding.
+        """
+        assert self._current_path is not None
+        with self._current_path.open("rb") as f:
+            size = f.seek(0, 2)
+            if size < self._offset:
+                # The file shrank below our stored offset: it was truncated
+                # or rewritten in place without a session-folder rotation.
+                # Treat it as a fresh file rather than seeking past EOF.
+                self._offset = 0
             f.seek(self._offset)
-            yield from f
-            self._offset = f.tell()
+            return f.read()
+
+    def _complete_lines(self, new_bytes: bytes) -> Iterator[str]:
+        """Yield only newline-terminated lines from new_bytes, decoded as
+        UTF-8. Any trailing fragment without a newline is left unconsumed
+        (the offset is not advanced past it) so the next poll() re-reads and
+        completes it instead of yielding a corrupt partial line."""
+        last_newline = new_bytes.rfind(b"\n")
+        if last_newline == -1:
+            return
+        complete = new_bytes[: last_newline + 1]
+        self._offset += len(complete)
+        text = complete.decode("utf-8", errors="replace")
+        for line in text.split("\n")[:-1]:
+            yield line + "\n"
