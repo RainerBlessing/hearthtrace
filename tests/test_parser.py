@@ -18,3 +18,18 @@ def test_parse_log_extracts_result() -> None:
     game = parse_log(FIXTURE)
 
     assert game.result == "WON"
+
+
+def test_parse_log_extracts_first_play_event() -> None:
+    game = parse_log(FIXTURE)
+
+    assert len(game.turn_log) > 0
+    first = game.turn_log[0]
+    # Real Hearthstone turn numbering counts each player's turn separately
+    # (turn 1 = the first player's opening turn, turn 2 = the second
+    # player's opening turn, ...). Nobody played anything on turn 1 in
+    # this match; the opponent's Elven Archer on their opening turn is
+    # the very first PLAY block in the fixture.
+    assert first.turn == 2
+    assert first.player_name == "Gastwirt"
+    assert first.card_name == "Elven Archer"

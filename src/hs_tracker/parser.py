@@ -10,9 +10,18 @@ from typing import Any
 
 from hearthstone.cardxml import load as load_cards
 from hearthstone.entities import Game, Player
-from hearthstone.enums import GameTag, PlayState
+from hearthstone.enums import BlockType, GameTag, PlayState
 from hslog import LogParser
+from hslog import packets as hslog_packets
 from hslog.export import EntityTreeExporter, FriendlyPlayerExporter
+from hslog.player import coerce_to_entity_id
+
+
+@dataclass
+class PlayEvent:
+    turn: int
+    player_name: str
+    card_name: str
 
 
 @dataclass
@@ -24,6 +33,7 @@ class ParsedGame:
     # contain duplicates.
     starting_deck: list[str]
     result: str  # "WON" | "LOST" | "TIED" | "CONCEDED" | "UNKNOWN"
+    turn_log: list[PlayEvent]
 
 
 def _class_name(player: Player, card_db: Any) -> str:
@@ -46,6 +56,63 @@ def _result_for(player: Player) -> str:
     return PlayState(playstate).name if playstate else "UNKNOWN"
 
 
+class _TurnLogWalker:
+    """Walks a packet tree tracking whose turn it is, collecting a
+    `PlayEvent` for every BlockType.PLAY block.
+
+    Hearthstone numbers turns globally (turn 1 = the first player's
+    opening turn, turn 2 = the second player's opening turn, ...) and only
+    the GameEntity's own TAG_CHANGE TURN reflects that global count -- each
+    player also gets their own per-player TURN tag (their Nth own turn),
+    which would misattribute turn numbers if not filtered out.
+    """
+
+    def __init__(self, game: Game, card_db: Any) -> None:
+        self._game = game
+        self._card_db = card_db
+        self._current_turn = 0
+        self.events: list[PlayEvent] = []
+
+    def walk(self, packet_tree: Any) -> list[PlayEvent]:
+        for packet in packet_tree:
+            self._visit(packet)
+        return self.events
+
+    def _visit(self, packet: Any) -> None:
+        if isinstance(packet, hslog_packets.TagChange):
+            self._handle_tag_change(packet)
+        elif isinstance(packet, hslog_packets.Block):
+            self._handle_block(packet)
+        for child in getattr(packet, "packets", []):
+            self._visit(child)
+
+    def _handle_tag_change(self, packet: Any) -> None:
+        if packet.tag != GameTag.TURN:
+            return
+        entity_id = int(coerce_to_entity_id(packet.entity))
+        if self._game.find_entity_by_id(entity_id) is self._game:
+            self._current_turn = packet.value
+
+    def _handle_block(self, packet: Any) -> None:
+        if packet.type != BlockType.PLAY:
+            return
+        entity_id = int(coerce_to_entity_id(packet.entity))
+        entity = self._game.find_entity_by_id(entity_id)
+        if entity is None or not entity.card_id:
+            return
+        controller = entity.controller
+        player_name = controller.name if controller else "?"
+        card = self._card_db.get(entity.card_id)
+        card_name = card.name if card else entity.card_id
+        self.events.append(
+            PlayEvent(turn=self._current_turn, player_name=player_name, card_name=card_name)
+        )
+
+
+def _extract_turn_log(packet_tree: Any, game: Game, card_db: Any) -> list[PlayEvent]:
+    return _TurnLogWalker(game, card_db).walk(packet_tree)
+
+
 def parse_log(path: Path) -> ParsedGame:
     parser = LogParser()
     with path.open() as f:
@@ -65,4 +132,5 @@ def parse_log(path: Path) -> ParsedGame:
         opponent_class=_class_name(opponent, card_db),
         starting_deck=me.known_starting_deck_list,
         result=_result_for(me),
+        turn_log=_extract_turn_log(packet_tree, game, card_db),
     )
