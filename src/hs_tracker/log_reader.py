@@ -60,7 +60,11 @@ class LogWatcher:
         """Yield only newline-terminated lines from new_bytes, decoded as
         UTF-8. Any trailing fragment without a newline is left unconsumed
         (the offset is not advanced past it) so the next poll() re-reads and
-        completes it instead of yielding a corrupt partial line."""
+        completes it instead of yielding a corrupt partial line.
+
+        Hearthstone's Power.log uses Windows-style CRLF line endings, so a
+        trailing "\\r" is stripped from each line before re-appending "\\n"
+        (a bare LF from a differently-generated log is left untouched)."""
         last_newline = new_bytes.rfind(b"\n")
         if last_newline == -1:
             return
@@ -68,4 +72,4 @@ class LogWatcher:
         self._offset += len(complete)
         text = complete.decode("utf-8", errors="replace")
         for line in text.split("\n")[:-1]:
-            yield line + "\n"
+            yield line.rstrip("\r") + "\n"

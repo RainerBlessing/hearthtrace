@@ -161,3 +161,18 @@ def test_log_watcher_replaces_invalid_utf8_bytes_instead_of_raising(
     assert len(lines) == 1
     assert lines[0].startswith("card played: ")
     assert "�" in lines[0]
+
+
+def test_log_watcher_strips_carriage_return_from_windows_line_endings(
+    tmp_path: Path,
+) -> None:
+    logs_dir = tmp_path / "Logs"
+    session = logs_dir / "Hearthstone_2026_09_06_18_30_00"
+    session.mkdir(parents=True)
+    power_log = session / "Power.log"
+    # The real Hearthstone client writes Power.log with CRLF line endings.
+    power_log.write_bytes(b"line1\r\nline2\r\n")
+
+    watcher = LogWatcher(logs_dir)
+
+    assert list(watcher.poll()) == ["line1\n", "line2\n"]
