@@ -102,11 +102,20 @@ class _TurnLogWalker:
 
     `EntityTreeExporter.export()` has already applied every packet by the
     time this walker runs, so `entity.tags` only ever reflects the final,
-    post-match state -- it cannot tell us what an entity's zone was right
-    before a given TAG_CHANGE. Zone history is therefore tracked
-    ourselves, packet by packet, seeded from `entity.initial_zone` (the
-    zone captured when the entity was first registered) the first time
-    each entity is seen.
+    post-match state -- it cannot tell us what an entity's zone or
+    controller was right before a given TAG_CHANGE. Zone history and
+    controller history are therefore tracked ourselves, packet by packet,
+    seeded from `entity.initial_zone` / `entity.initial_controller` (the
+    values captured when the entity was first registered) the first time
+    each entity is seen. Tracking controller history matters because some
+    effects (e.g. Death Knight "Plague" cards) change an entity's
+    controller mid-match, which would otherwise misattribute a historical
+    draw to whichever player ends up controlling the card by the end.
+
+    A given entity is only ever recorded as "drawn" once, no matter how
+    many times it leaves `Zone.DECK` -- a card dealt into the opening hand
+    and then mulliganed back only re-enters the deck to be drawn again
+    later; that is still the same single physical card leaving the deck.
     """
 
     def __init__(self, game: Game, card_db: Any, friendly_player: Player) -> None:
@@ -115,6 +124,8 @@ class _TurnLogWalker:
         self._friendly_player = friendly_player
         self._current_turn = 0
         self._zone_by_entity_id: dict[int, Zone] = {}
+        self._controller_by_entity_id: dict[int, Player | None] = {}
+        self._drawn_entity_ids: set[int] = set()
         self.events: list[PlayEvent] = []
         self.drawn_card_ids: list[str] = []
 
@@ -135,11 +146,20 @@ class _TurnLogWalker:
             self._handle_turn_change(packet)
         elif packet.tag == GameTag.ZONE:
             self._handle_zone_change(packet)
+        elif packet.tag == GameTag.CONTROLLER:
+            self._handle_controller_change(packet)
 
     def _handle_turn_change(self, packet: Any) -> None:
         entity_id = int(coerce_to_entity_id(packet.entity))
         if self._game.find_entity_by_id(entity_id) is self._game:
             self._current_turn = packet.value
+
+    def _handle_controller_change(self, packet: Any) -> None:
+        entity_id = int(coerce_to_entity_id(packet.entity))
+        self._controller_by_entity_id[entity_id] = self._game.get_player(packet.value)
+
+    def _controller_at_time(self, entity_id: int, entity: Any) -> Player | None:
+        return self._controller_by_entity_id.get(entity_id, entity.initial_controller)
 
     def _handle_zone_change(self, packet: Any) -> None:
         entity_id = int(coerce_to_entity_id(packet.entity))
@@ -152,10 +172,13 @@ class _TurnLogWalker:
 
         if old_zone != Zone.DECK or new_zone == Zone.DECK:
             return
-        if entity.controller is not self._friendly_player:
+        if entity_id in self._drawn_entity_ids:
+            return
+        if self._controller_at_time(entity_id, entity) is not self._friendly_player:
             return
         card_id = getattr(entity, "card_id", None)
         if card_id:
+            self._drawn_entity_ids.add(entity_id)
             self.drawn_card_ids.append(card_id)
 
     def _handle_block(self, packet: Any) -> None:
