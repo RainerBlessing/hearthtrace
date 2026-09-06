@@ -55,6 +55,14 @@ def test_parse_log_extracts_result() -> None:
     assert game.result == "WON"
 
 
+def test_parse_log_extracts_game_index() -> None:
+    # The real fixture contains exactly one CREATE_GAME block, so the game
+    # returned (the last -- and here, only -- one in the file) is the 1st.
+    game = parse_log(FIXTURE)
+
+    assert game.game_index == 1
+
+
 def test_parse_log_extracts_first_play_event() -> None:
     game = parse_log(FIXTURE)
 

@@ -12,6 +12,7 @@ def test_remaining_deck_removes_drawn_cards() -> None:
             PlayEvent(turn=1, player_name="Me", card_name="Arcane Missiles"),
         ],
         drawn_card_ids=["CS2_022"],
+        game_index=1,
     )
 
     remaining = remaining_deck(game)

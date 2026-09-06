@@ -67,6 +67,12 @@ class ParsedGame:
     # match, in draw order. Duplicates allowed; not deduplicated against
     # `starting_deck`.
     drawn_card_ids: list[str]
+    # 1-based count of CREATE_GAME blocks seen in the file up to and
+    # including this game (i.e. which match, in order, this is within a
+    # single session's Power.log). A session log can contain several
+    # matches; this lets callers tell two different matches with the same
+    # `result` apart for dedup purposes.
+    game_index: int
 
 
 def _class_name(player: Player, card_db: Any) -> str:
@@ -229,4 +235,5 @@ def parse_log(path: Path) -> ParsedGame:
         result=_result_for(me),
         turn_log=turn_log,
         drawn_card_ids=drawn_card_ids,
+        game_index=len(parser.games),
     )

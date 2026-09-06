@@ -12,6 +12,7 @@ def test_render_match_summary_includes_result_and_turn_log() -> None:
         result="WON",
         turn_log=[PlayEvent(turn=1, player_name="Me", card_name="Arcane Missiles")],
         drawn_card_ids=[],
+        game_index=1,
     )
 
     markdown = render_match_summary(game)
@@ -24,7 +25,7 @@ def test_render_match_summary_includes_result_and_turn_log() -> None:
 def test_export_match_summary_writes_a_file(tmp_path: Path) -> None:
     game = ParsedGame(
         own_class="MAGE", opponent_class="WARRIOR", starting_deck=[],
-        result="WON", turn_log=[], drawn_card_ids=[],
+        result="WON", turn_log=[], drawn_card_ids=[], game_index=1,
     )
 
     written = export_match_summary(game, export_dir=tmp_path)

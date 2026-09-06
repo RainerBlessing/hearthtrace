@@ -1,5 +1,6 @@
 """The live deck-list window."""
 
+import sys
 from pathlib import Path
 
 import gi
@@ -13,6 +14,12 @@ from hs_tracker.deck_state import remaining_deck  # noqa: E402
 from hs_tracker.log_reader import find_latest_power_log  # noqa: E402
 from hs_tracker.markdown_export import export_match_summary  # noqa: E402
 from hs_tracker.parser import NoGameFoundError, ParsedGame, parse_log  # noqa: E402
+
+# Terminal `PlayState` values (mirrors `markdown_export._RESULT_LABELS`'
+# terminal set). Anything else -- PLAYING, WINNING, LOSING, DISCONNECTED,
+# UNKNOWN, INVALID -- means the match is still in progress and must not
+# trigger an export yet.
+_FINISHED_RESULTS = {"WON", "LOST", "TIED", "CONCEDED"}
 
 
 class TrackerWindow(Adw.ApplicationWindow):
@@ -29,7 +36,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._config = config
         self._last_log_path: Path | None = None
         self._last_log_mtime: float | None = None
-        self._last_exported_result: str | None = None
+        self._last_exported_key: str | None = None
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(Adw.HeaderBar())
@@ -58,7 +65,23 @@ class TrackerWindow(Adw.ApplicationWindow):
         `LogWatcher`'s offset-tracking, which is designed to avoid
         re-reading lines already seen, not to detect "has this file
         changed since I last looked".
+
+        The whole body is wrapped in a broad `except Exception`: PyGObject
+        permanently stops a `GLib.timeout_add_seconds` source if its
+        callback raises, so an uncaught error here (e.g. `hslog` choking on
+        a torn/concurrent read of a growing Power.log, or a failed export
+        due to a bad `export_dir`) would otherwise silently freeze the UI
+        with stale data forever, with no visible error for a user who
+        launched via the .desktop entry (no attached terminal).
         """
+        try:
+            return self._poll_once()
+        except Exception as exc:  # noqa: BLE001 - must never kill the poll loop
+            print(f"hs-tracker: error while polling log: {exc}", file=sys.stderr)
+            self._status_label.set_label("Fehler beim Lesen des Logs — siehe Terminal")
+            return True  # keep polling so a transient condition can recover
+
+    def _poll_once(self) -> bool:
         log_path = find_latest_power_log(self._config.logs_dir)
         if log_path is None or not log_path.exists():
             self._status_label.set_label("Warte auf Hearthstone …")
@@ -71,6 +94,9 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._last_log_mtime = mtime
 
         try:
+            # Accepted MVP simplification: this re-parses the entire session
+            # Power.log from scratch on every tick, which could grow more
+            # expensive over a very long play session -- not redesigned now.
             game = parse_log(log_path)
         except NoGameFoundError:
             self._status_label.set_label("Warte auf Hearthstone …")
@@ -92,16 +118,26 @@ class TrackerWindow(Adw.ApplicationWindow):
     def _maybe_export(self, game: ParsedGame) -> None:
         """Export a Markdown summary once per finished match.
 
-        A match is "finished" when its result is a known terminal state.
-        `_last_exported_result` is a coarse dedup key: since `parse_log`
-        re-parses the whole file every tick, an already-finished match
-        would otherwise be re-exported on every subsequent poll while the
+        A match is "finished" only once its result is one of the terminal
+        `_FINISHED_RESULTS`. `PlayState` also has non-terminal, truthy
+        values (PLAYING, WINNING, LOSING, DISCONNECTED) that are not
+        "UNKNOWN" either -- exporting on those would produce a premature
+        summary for a match still in progress.
+
+        `_last_exported_key` is a dedup key keyed on `game.game_index`
+        (rather than `game.result`) because a single session's Power.log
+        can contain multiple matches (parser.games grows with each
+        CREATE_GAME) -- keying on result alone would silently skip
+        exporting a second match that happens to end the same way as the
+        previous one (e.g. two wins in a row). Since `parse_log` re-parses
+        the whole file every tick, an already-finished match would
+        otherwise also be re-exported on every subsequent poll while the
         same log file is still the newest one on disk.
         """
-        if game.result == "UNKNOWN":
+        if game.result not in _FINISHED_RESULTS:
             return
-        export_key = f"{self._last_log_path}:{game.result}"
-        if export_key == self._last_exported_result:
+        export_key = f"{self._last_log_path}:{game.game_index}"
+        if export_key == self._last_exported_key:
             return
-        self._last_exported_result = export_key
+        self._last_exported_key = export_key
         export_match_summary(game, export_dir=self._config.export_dir)
