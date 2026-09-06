@@ -26,6 +26,27 @@ class PlayEvent:
 
 @dataclass
 class ParsedGame:
+    """A stable snapshot of one match, derived from a single Power.log.
+
+    Known MVP limitations (accepted scope boundaries, not bugs):
+    - `starting_deck` is only reliable for constructed formats (Standard/
+      Wild/Practice). In Arena, Battlegrounds, Tavern Brawl, etc. it may be
+      empty or not represent a real 30-card deck — callers building on this
+      (e.g. a "remaining deck" view) should treat a suspiciously short or
+      empty `starting_deck` as "not supported for this mode", not as "few
+      cards left".
+    - `turn_log` only records top-level `BlockType.PLAY` blocks (cards
+      played directly from hand). It does not include hero power
+      activations (`BlockType.POWER`), nor plays nested inside another
+      block (e.g. a battlecry/discover effect that plays a card
+      automatically) — those are attributed to the outer effect, not
+      recorded as a separate play.
+    - If the game reconnects mid-match, Hearthstone re-emits CREATE_GAME,
+      and `parse_log` (which always reads the last game in the file) would
+      then reflect only the post-reconnect fragment, missing mulligan and
+      earlier turns. Not handled — out of scope for the MVP.
+    """
+
     own_class: str
     opponent_class: str
     # Card ids known by the end of the match (drawn, played, or otherwise
