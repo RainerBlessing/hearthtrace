@@ -3,9 +3,8 @@ from pathlib import Path
 import pytest
 from hearthstone.entities import Card, Game, Player
 from hearthstone.enums import GameTag, Zone
-from hslog import packets as hslog_packets
 
-from hs_tracker.parser import NoGameFoundError, _TurnLogWalker, parse_log
+from hs_tracker.parser import NoGameFoundError, _deck_status, parse_log
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_match.power.log"
 
@@ -28,16 +27,6 @@ def _register_card(
     card.tag_change(GameTag.CONTROLLER, controller.player_id)
     game.register_entity(card)
     return card
-
-
-def _zone_change(entity_id: int, zone: Zone) -> hslog_packets.TagChange:
-    return hslog_packets.TagChange(ts=None, entity=entity_id, tag=GameTag.ZONE, value=zone)
-
-
-def _controller_change(entity_id: int, controller: Player) -> hslog_packets.TagChange:
-    return hslog_packets.TagChange(
-        ts=None, entity=entity_id, tag=GameTag.CONTROLLER, value=controller.player_id
-    )
 
 
 def test_parse_log_extracts_own_class_and_deck_size() -> None:
@@ -72,21 +61,67 @@ def test_parse_log_extracts_first_play_event() -> None:
     # (turn 1 = the first player's opening turn, turn 2 = the second
     # player's opening turn, ...). Nobody played anything on turn 1 in
     # this match; the opponent's Elven Archer on their opening turn is
-    # the very first PLAY block in the fixture.
+    # the very first PLAY block in the fixture. `player_name` is "Du"/
+    # "Gegner" (never the raw Battle.net account name) so match summaries
+    # can be pasted without leaking the user's real BattleTag.
     assert first.turn == 2
-    assert first.player_name == "Gastwirt"
+    assert first.player_name == "Gegner"
     assert first.card_name == "Elven Archer"
 
 
-def test_parse_log_extracts_drawn_card_ids() -> None:
+def test_parse_log_extracts_not_in_deck_card_ids() -> None:
     game = parse_log(FIXTURE)
 
-    # Cards that left Zone.DECK for the friendly player (Friendly#1000)
-    # during the match, in draw order, duplicates allowed.
-    assert len(game.drawn_card_ids) == 9
-    assert game.drawn_card_ids[0] == "CORE_WC_042"
-    # Witch's Apprentice ("CORE_GIL_531") was drawn twice in this match.
+    # Card ids from the friendly player's (Friendly#1000) starting deck
+    # that are NOT in Zone.DECK by the end of the match -- a final-state
+    # snapshot, not a history of every draw. Of the 15 known starting-deck
+    # cards, 14 ended the match somewhere other than the deck (hand,
+    # graveyard, battlefield, ...) and exactly one ("CORE_EX1_238") ended
+    # back in Zone.DECK.
+    assert len(game.drawn_card_ids) == 14
+    assert "CORE_WC_042" in game.drawn_card_ids
+    assert "CORE_EX1_238" not in game.drawn_card_ids
+    # Witch's Apprentice ("CORE_GIL_531") had both of its copies leave the
+    # deck (one to the graveyard, one onto the battlefield) and neither
+    # ended the match back in the deck.
     assert game.drawn_card_ids.count("CORE_GIL_531") == 2
+
+
+def test_deck_status_marks_a_card_not_ending_the_match_in_the_deck() -> None:
+    # A card mulliganed away and then redrawn later (or simply drawn and
+    # held/played) ends the match somewhere other than Zone.DECK -- it must
+    # be reported as not-in-deck exactly once, not double-counted for
+    # having left the deck twice.
+    game, friendly, _opponent = _make_game_with_players()
+    _register_card(game, entity_id=10, card_id="CS2_022", controller=friendly)
+    card = game.find_entity_by_id(10)
+    assert card is not None
+    card.tag_change(GameTag.ZONE, Zone.HAND)  # mulliganed into opening hand
+    card.tag_change(GameTag.ZONE, Zone.DECK)  # mulliganed back
+    card.tag_change(GameTag.ZONE, Zone.HAND)  # drawn again later; ends here
+
+    remaining, not_in_deck = _deck_status(friendly)
+
+    assert remaining == []
+    assert not_in_deck == ["CS2_022"]
+
+
+def test_deck_status_keeps_a_mulliganed_and_never_redrawn_card_as_remaining() -> None:
+    # Regression test: a card dealt into the opening hand and mulliganed
+    # back, and never drawn again, ends the match back in Zone.DECK -- it
+    # is still physically in the deck and must count as remaining, not be
+    # permanently marked as drawn just because it once left the deck.
+    game, friendly, _opponent = _make_game_with_players()
+    _register_card(game, entity_id=11, card_id="CS2_023", controller=friendly)
+    card = game.find_entity_by_id(11)
+    assert card is not None
+    card.tag_change(GameTag.ZONE, Zone.HAND)  # dealt into opening hand
+    card.tag_change(GameTag.ZONE, Zone.DECK)  # mulliganed back, never redrawn
+
+    remaining, not_in_deck = _deck_status(friendly)
+
+    assert remaining == ["CS2_023"]
+    assert not_in_deck == []
 
 
 def test_parse_log_raises_no_game_found_error_when_log_has_no_create_game(
@@ -102,70 +137,3 @@ def test_parse_log_raises_no_game_found_error_when_log_has_no_create_game(
 
     with pytest.raises(NoGameFoundError):
         parse_log(log_without_a_game)
-
-
-def test_turn_log_walker_does_not_double_count_a_mulliganed_and_redrawn_card() -> None:
-    # A card dealt into the opening hand (DECK->HAND, draw #1), mulliganed
-    # back (HAND->DECK, not a draw), then drawn again naturally
-    # (DECK->HAND) is only ONE physical card leaving the deck -- it must
-    # only be recorded once, not twice.
-    game, friendly, _opponent = _make_game_with_players()
-    _register_card(game, entity_id=10, card_id="CS2_022", controller=friendly)
-
-    walker = _TurnLogWalker(game, card_db=None, friendly_player=friendly)
-    walker.walk(
-        [
-            _zone_change(10, Zone.HAND),
-            _zone_change(10, Zone.DECK),
-            _zone_change(10, Zone.HAND),
-        ]
-    )
-
-    assert walker.drawn_card_ids == ["CS2_022"]
-
-
-def test_turn_log_walker_attributes_draws_using_controller_at_time_of_event() -> None:
-    # The entity's *final* controller (friendly) differs from who
-    # controlled it when it actually left the deck (opponent). This
-    # mirrors Death Knight "Plague" cards, which shuffle a copy into the
-    # opponent's deck mid-match. The draw happened under the opponent's
-    # control and must not be attributed to the friendly player just
-    # because `entity.controller` reflects the end-of-match state.
-    game, friendly, opponent = _make_game_with_players()
-    card = _register_card(game, entity_id=30, card_id="CORE_DK_100", controller=opponent)
-    # Simulate EntityTreeExporter.export() having already applied every
-    # packet -- including a later CONTROLLER change -- by the time the
-    # walker runs, so `entity.tags` (and thus `entity.controller`) only
-    # ever reflects this final state.
-    card.tag_change(GameTag.CONTROLLER, friendly.player_id)
-
-    walker = _TurnLogWalker(game, card_db=None, friendly_player=friendly)
-    walker.walk(
-        [
-            _zone_change(30, Zone.HAND),  # drawn while still opponent-controlled
-            _controller_change(30, friendly),  # control changes only afterwards
-        ]
-    )
-
-    assert walker.drawn_card_ids == []
-
-
-def test_turn_log_walker_attributes_earlier_draw_to_the_controller_at_that_time() -> None:
-    # Mirror image of the above: the entity's *final* controller is the
-    # opponent (e.g. it was later given away or shuffled elsewhere), but
-    # it was drawn by the friendly player earlier, while still under their
-    # control. That earlier draw must still be counted for the friendly
-    # player, not silently dropped because of what happens to it later.
-    game, friendly, opponent = _make_game_with_players()
-    card = _register_card(game, entity_id=40, card_id="CORE_DK_101", controller=friendly)
-    card.tag_change(GameTag.CONTROLLER, opponent.player_id)
-
-    walker = _TurnLogWalker(game, card_db=None, friendly_player=friendly)
-    walker.walk(
-        [
-            _zone_change(40, Zone.HAND),  # drawn while still friendly-controlled
-            _controller_change(40, opponent),  # control changes only afterwards
-        ]
-    )
-
-    assert walker.drawn_card_ids == ["CORE_DK_101"]
