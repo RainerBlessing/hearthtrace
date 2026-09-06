@@ -10,7 +10,7 @@ from typing import Any
 
 from hearthstone.cardxml import load as load_cards
 from hearthstone.entities import Game, Player
-from hearthstone.enums import BlockType, GameTag, PlayState
+from hearthstone.enums import BlockType, GameTag, PlayState, Zone
 from hslog import LogParser
 from hslog import packets as hslog_packets
 from hslog.export import EntityTreeExporter, FriendlyPlayerExporter
@@ -63,6 +63,10 @@ class ParsedGame:
     starting_deck: list[str]
     result: str  # "WON" | "LOST" | "TIED" | "CONCEDED" | "UNKNOWN"
     turn_log: list[PlayEvent]
+    # Card ids that left Zone.DECK for the friendly player during the
+    # match, in draw order. Duplicates allowed; not deduplicated against
+    # `starting_deck`.
+    drawn_card_ids: list[str]
 
 
 def _class_name(player: Player, card_db: Any) -> str:
@@ -87,25 +91,36 @@ def _result_for(player: Player) -> str:
 
 class _TurnLogWalker:
     """Walks a packet tree tracking whose turn it is, collecting a
-    `PlayEvent` for every BlockType.PLAY block.
+    `PlayEvent` for every BlockType.PLAY block and a drawn card id for
+    every card that leaves the friendly player's deck.
 
     Hearthstone numbers turns globally (turn 1 = the first player's
     opening turn, turn 2 = the second player's opening turn, ...) and only
     the GameEntity's own TAG_CHANGE TURN reflects that global count -- each
     player also gets their own per-player TURN tag (their Nth own turn),
     which would misattribute turn numbers if not filtered out.
+
+    `EntityTreeExporter.export()` has already applied every packet by the
+    time this walker runs, so `entity.tags` only ever reflects the final,
+    post-match state -- it cannot tell us what an entity's zone was right
+    before a given TAG_CHANGE. Zone history is therefore tracked
+    ourselves, packet by packet, seeded from `entity.initial_zone` (the
+    zone captured when the entity was first registered) the first time
+    each entity is seen.
     """
 
-    def __init__(self, game: Game, card_db: Any) -> None:
+    def __init__(self, game: Game, card_db: Any, friendly_player: Player) -> None:
         self._game = game
         self._card_db = card_db
+        self._friendly_player = friendly_player
         self._current_turn = 0
+        self._zone_by_entity_id: dict[int, Zone] = {}
         self.events: list[PlayEvent] = []
+        self.drawn_card_ids: list[str] = []
 
-    def walk(self, packet_tree: Any) -> list[PlayEvent]:
+    def walk(self, packet_tree: Any) -> None:
         for packet in packet_tree:
             self._visit(packet)
-        return self.events
 
     def _visit(self, packet: Any) -> None:
         if isinstance(packet, hslog_packets.TagChange):
@@ -116,11 +131,32 @@ class _TurnLogWalker:
             self._visit(child)
 
     def _handle_tag_change(self, packet: Any) -> None:
-        if packet.tag != GameTag.TURN:
-            return
+        if packet.tag == GameTag.TURN:
+            self._handle_turn_change(packet)
+        elif packet.tag == GameTag.ZONE:
+            self._handle_zone_change(packet)
+
+    def _handle_turn_change(self, packet: Any) -> None:
         entity_id = int(coerce_to_entity_id(packet.entity))
         if self._game.find_entity_by_id(entity_id) is self._game:
             self._current_turn = packet.value
+
+    def _handle_zone_change(self, packet: Any) -> None:
+        entity_id = int(coerce_to_entity_id(packet.entity))
+        entity = self._game.find_entity_by_id(entity_id)
+        if entity is None:
+            return
+        old_zone = self._zone_by_entity_id.get(entity_id, entity.initial_zone)
+        new_zone = packet.value
+        self._zone_by_entity_id[entity_id] = new_zone
+
+        if old_zone != Zone.DECK or new_zone == Zone.DECK:
+            return
+        if entity.controller is not self._friendly_player:
+            return
+        card_id = getattr(entity, "card_id", None)
+        if card_id:
+            self.drawn_card_ids.append(card_id)
 
     def _handle_block(self, packet: Any) -> None:
         if packet.type != BlockType.PLAY:
@@ -138,8 +174,12 @@ class _TurnLogWalker:
         )
 
 
-def _extract_turn_log(packet_tree: Any, game: Game, card_db: Any) -> list[PlayEvent]:
-    return _TurnLogWalker(game, card_db).walk(packet_tree)
+def _extract_turn_log_and_draws(
+    packet_tree: Any, game: Game, card_db: Any, friendly_player: Player
+) -> tuple[list[PlayEvent], list[str]]:
+    walker = _TurnLogWalker(game, card_db, friendly_player)
+    walker.walk(packet_tree)
+    return walker.events, walker.drawn_card_ids
 
 
 def parse_log(path: Path) -> ParsedGame:
@@ -157,11 +197,13 @@ def parse_log(path: Path) -> ParsedGame:
 
     me, opponent = _friendly_and_opponent(game, packet_tree)
     card_db, _ = load_cards()
+    turn_log, drawn_card_ids = _extract_turn_log_and_draws(packet_tree, game, card_db, me)
 
     return ParsedGame(
         own_class=_class_name(me, card_db),
         opponent_class=_class_name(opponent, card_db),
         starting_deck=me.known_starting_deck_list,
         result=_result_for(me),
-        turn_log=_extract_turn_log(packet_tree, game, card_db),
+        turn_log=turn_log,
+        drawn_card_ids=drawn_card_ids,
     )

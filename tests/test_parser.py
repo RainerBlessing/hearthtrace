@@ -37,6 +37,17 @@ def test_parse_log_extracts_first_play_event() -> None:
     assert first.card_name == "Elven Archer"
 
 
+def test_parse_log_extracts_drawn_card_ids() -> None:
+    game = parse_log(FIXTURE)
+
+    # Cards that left Zone.DECK for the friendly player (Friendly#1000)
+    # during the match, in draw order, duplicates allowed.
+    assert len(game.drawn_card_ids) == 9
+    assert game.drawn_card_ids[0] == "CORE_WC_042"
+    # Witch's Apprentice ("CORE_GIL_531") was drawn twice in this match.
+    assert game.drawn_card_ids.count("CORE_GIL_531") == 2
+
+
 def test_parse_log_raises_no_game_found_error_when_log_has_no_create_game(
     tmp_path: Path,
 ) -> None:
