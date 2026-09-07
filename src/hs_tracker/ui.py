@@ -95,8 +95,6 @@ class TrackerWindow(Adw.ApplicationWindow):
         mtime = log_path.stat().st_mtime
         if log_path == self._last_log_path and mtime == self._last_log_mtime:
             return True  # no change since last poll
-        self._last_log_path = log_path
-        self._last_log_mtime = mtime
 
         try:
             # Accepted MVP simplification: this re-parses the entire session
@@ -104,9 +102,24 @@ class TrackerWindow(Adw.ApplicationWindow):
             # expensive over a very long play session -- not redesigned now.
             game = parse_log(log_path)
         except NoGameFoundError:
+            # A stable, expected state (no CREATE_GAME yet) -- fine to
+            # remember this mtime, since re-parsing unchanged content
+            # would only give the same result again.
+            self._last_log_path = log_path
+            self._last_log_mtime = mtime
             self._status_label.set_label("Warte auf Hearthstone …")
             return True
 
+        # Only remember this mtime as "handled" once parsing actually
+        # succeeded. A transient failure (e.g. hslog choking on a torn
+        # read while Hearthstone is mid-write) is reported by `_poll`'s
+        # broad `except Exception` -- but if this method had already
+        # updated `_last_log_mtime` before that, the very next tick's
+        # early-return above would skip retrying entirely until the file
+        # changes again, potentially getting stuck on a stale error and
+        # missing the match's true final state.
+        self._last_log_path = log_path
+        self._last_log_mtime = mtime
         self._refresh_deck_list(game)
         self._maybe_export(game)
         return True

@@ -497,13 +497,22 @@ def _entity_diff_lines(
     )
     if transition is not None:
         return [transition]
-    if previous is None:
-        return []
     if resolved_previous[0] not in _VISIBLE_ZONES and current[0] not in _VISIBLE_ZONES:
         # Neither before nor after touches the board or a hand -- this
         # entity was never visible to either player, so its stat churn
         # (e.g. a card implementation's internal candidate-summon pool)
         # isn't something that "happened" from the player's perspective.
+        # Applies just as much to a brand-new entity (`previous is None`)
+        # as to one we already had a snapshot for -- e.g. Hearthstone's
+        # own client-side history-tile plumbing creates short-lived
+        # REMOVEDFROMGAME entities that are never real board events.
+        # NOTE: a minion that is both summoned *and* removed within one
+        # block without ever being observed in a visible zone at a block
+        # boundary (previous is None, current zone e.g. GRAVEYARD) is
+        # still silently dropped here -- not yet seen in a real match, so
+        # not worth a speculative fix; revisit if one turns up.
+        return []
+    if previous is None:
         return []
     return _stat_diff_lines(entity_type == CardType.HERO, name, resolved_previous, current)
 
