@@ -7,7 +7,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, GObject, Gtk  # noqa: E402
 from hearthstone.cardxml import load as load_cards  # noqa: E402
 
 from hs_tracker.config import Config  # noqa: E402
@@ -54,6 +54,12 @@ _REPLAY_STAGE_ACTIONS = "actions"
 _REPLAY_STAGE_END = "end"
 _REPLAY_STAGES = (_REPLAY_STAGE_START, _REPLAY_STAGE_ACTIONS, _REPLAY_STAGE_END)
 
+# UI-only relabeling for a minion-keyword chip's text -- purely cosmetic,
+# doesn't touch `parser.py`'s wording (also used, unchanged, by the
+# Markdown export). Only "kann angreifen" has a shorter, chip-friendly
+# alternative worth using; every other keyword is already short.
+_KEYWORD_CHIP_LABELS = {"kann angreifen": "bereit"}
+
 
 class TrackerWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application, config: Config) -> None:
@@ -91,22 +97,17 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._replay_stage = _REPLAY_STAGE_START
 
         header_bar = Adw.HeaderBar()
-        # Three-way exclusive toggle (Gtk.ToggleButton.set_group, GTK4's
-        # radio-button replacement) rather than Adw.ViewStack/ViewSwitcher:
-        # this window is only 320px wide, too narrow for switcher chrome to
-        # look right.
-        tracker_toggle = Gtk.ToggleButton(label="Live", active=True)
-        history_toggle = Gtk.ToggleButton(label="Verlauf")
-        replay_toggle = Gtk.ToggleButton(label="Replay")
-        history_toggle.set_group(tracker_toggle)
-        replay_toggle.set_group(tracker_toggle)
-        for button, page_name in (
-            (tracker_toggle, "tracker"),
-            (history_toggle, "history"),
-            (replay_toggle, "replay"),
-        ):
-            button.connect("toggled", self._on_view_toggled, page_name)
-            header_bar.pack_end(button)
+        # Adw.ToggleGroup (libadwaita >=1.7): a real segmented control, not
+        # Adw.ViewStack/ViewSwitcher -- this window is only 320px wide, too
+        # narrow for switcher chrome to look right.
+        view_group = Adw.ToggleGroup()
+        for name, label in (("tracker", "Live"), ("history", "Verlauf"), ("replay", "Replay")):
+            toggle = Adw.Toggle()
+            toggle.set_name(name)
+            toggle.set_label(label)
+            view_group.add(toggle)
+        view_group.connect("notify::active-name", self._on_view_toggled)
+        header_bar.pack_end(view_group)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header_bar)
@@ -136,33 +137,45 @@ class TrackerWindow(Adw.ApplicationWindow):
 
     def _build_replay_box(self) -> Gtk.Box:
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._replay_prev_button = Gtk.Button(label="◀")
+        nav_box.set_halign(Gtk.Align.CENTER)
+        self._replay_prev_button = Gtk.Button(icon_name="go-previous-symbolic")
+        self._replay_prev_button.add_css_class("flat")
+        self._replay_prev_button.add_css_class("circular")
         self._replay_prev_button.connect("clicked", self._on_replay_prev)
-        self._replay_turn_label = Gtk.Label(label="Keine Züge verfügbar", hexpand=True)
-        self._replay_next_button = Gtk.Button(label="▶")
+        self._replay_turn_label = Gtk.Label(label="Keine Züge verfügbar")
+        self._replay_turn_label.add_css_class("heading")
+        self._replay_next_button = Gtk.Button(icon_name="go-next-symbolic")
+        self._replay_next_button.add_css_class("flat")
+        self._replay_next_button.add_css_class("circular")
         self._replay_next_button.connect("clicked", self._on_replay_next)
         nav_box.append(self._replay_prev_button)
         nav_box.append(self._replay_turn_label)
         nav_box.append(self._replay_next_button)
 
-        snapshot_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._replay_stage_toggles = {
-            _REPLAY_STAGE_START: Gtk.ToggleButton(label="Start", active=True),
-            _REPLAY_STAGE_ACTIONS: Gtk.ToggleButton(label="Aktionen"),
-            _REPLAY_STAGE_END: Gtk.ToggleButton(label="Ende"),
-        }
-        first_toggle = self._replay_stage_toggles[_REPLAY_STAGE_START]
-        for stage, toggle in self._replay_stage_toggles.items():
-            if toggle is not first_toggle:
-                toggle.set_group(first_toggle)
-            toggle.connect("toggled", self._on_replay_stage_toggled, stage)
-            snapshot_box.append(toggle)
+        self._replay_position_label = Gtk.Label(label="")
+        self._replay_position_label.add_css_class("caption")
+        self._replay_position_label.add_css_class("dim-label")
+        self._replay_position_label.set_halign(Gtk.Align.CENTER)
+
+        self._replay_stage_group = Adw.ToggleGroup()
+        for name, label in (
+            (_REPLAY_STAGE_START, "Start"),
+            (_REPLAY_STAGE_ACTIONS, "Aktionen"),
+            (_REPLAY_STAGE_END, "Ende"),
+        ):
+            toggle = Adw.Toggle()
+            toggle.set_name(name)
+            toggle.set_label(label)
+            self._replay_stage_group.add(toggle)
+        self._replay_stage_group.connect("notify::active-name", self._on_replay_stage_toggled)
+        self._replay_stage_group.set_halign(Gtk.Align.CENTER)
 
         self._replay_content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
         replay_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         replay_box.append(nav_box)
-        replay_box.append(snapshot_box)
+        replay_box.append(self._replay_position_label)
+        replay_box.append(self._replay_stage_group)
         replay_box.append(Gtk.Separator())
         replay_box.append(self._replay_content_box)
 
@@ -176,9 +189,8 @@ class TrackerWindow(Adw.ApplicationWindow):
 
         return replay_box
 
-    def _on_view_toggled(self, button: Gtk.ToggleButton, page_name: str) -> None:
-        if not button.get_active():
-            return
+    def _on_view_toggled(self, group: Adw.ToggleGroup, _pspec: GObject.ParamSpec) -> None:
+        page_name = group.get_active_name()
         self._stack.set_visible_child_name(page_name)
         if page_name == "history":
             self._refresh_history_list()
@@ -220,10 +232,9 @@ class TrackerWindow(Adw.ApplicationWindow):
             self._replay_turn_index = min(last, self._replay_turn_index + 1)
         self._refresh_replay_view()
 
-    def _on_replay_stage_toggled(self, button: Gtk.ToggleButton, stage: str) -> None:
-        if button.get_active():
-            self._replay_stage = stage
-            self._refresh_replay_view()
+    def _on_replay_stage_toggled(self, group: Adw.ToggleGroup, _pspec: GObject.ParamSpec) -> None:
+        self._replay_stage = group.get_active_name()
+        self._refresh_replay_view()
 
     def _update_replay_state(self, game: ParsedGame) -> None:
         """Track the latest parsed game for Replay, called on every
@@ -263,21 +274,14 @@ class TrackerWindow(Adw.ApplicationWindow):
         elif keyval == Gdk.KEY_Right:
             self._on_replay_next(self._replay_next_button)
         elif keyval in (Gdk.KEY_s, Gdk.KEY_S):
-            self._replay_stage_toggles[_REPLAY_STAGE_START].set_active(True)
+            self._replay_stage_group.set_active_name(_REPLAY_STAGE_START)
         elif keyval in (Gdk.KEY_a, Gdk.KEY_A):
-            self._replay_stage_toggles[_REPLAY_STAGE_ACTIONS].set_active(True)
+            self._replay_stage_group.set_active_name(_REPLAY_STAGE_ACTIONS)
         elif keyval in (Gdk.KEY_e, Gdk.KEY_E):
-            self._replay_stage_toggles[_REPLAY_STAGE_END].set_active(True)
+            self._replay_stage_group.set_active_name(_REPLAY_STAGE_END)
         elif keyval == Gdk.KEY_space:
-            # Explicitly activate the *next* stage's own button rather than
-            # deactivating the current one: deactivating the currently-
-            # active button in a `set_group` pair does not automatically
-            # activate a sibling (GTK only auto-deactivates *others* when a
-            # button becomes active), which would leave nothing active and
-            # this handler's own `if button.get_active()` guard would then
-            # never fire to update `_replay_stage`.
             next_index = (_REPLAY_STAGES.index(self._replay_stage) + 1) % len(_REPLAY_STAGES)
-            self._replay_stage_toggles[_REPLAY_STAGES[next_index]].set_active(True)
+            self._replay_stage_group.set_active_name(_REPLAY_STAGES[next_index])
         else:
             return False
         return True
@@ -286,12 +290,16 @@ class TrackerWindow(Adw.ApplicationWindow):
         game = self._replay_game
         if game is None or not game.turns:
             self._replay_turn_label.set_label("Keine Züge verfügbar")
+            self._replay_position_label.set_label("")
             self._replay_prev_button.set_sensitive(False)
             self._replay_next_button.set_sensitive(False)
             self._clear_box(self._replay_content_box)
             return
         turn = game.turns[self._replay_turn_index]
         self._replay_turn_label.set_label(f"Zug {turn.number} – {turn.player_name}")
+        self._replay_position_label.set_label(
+            f"{self._replay_turn_index + 1} / {len(game.turns)}"
+        )
         self._replay_prev_button.set_sensitive(self._replay_turn_index > 0)
         self._replay_next_button.set_sensitive(self._replay_turn_index < len(game.turns) - 1)
         self._render_replay_turn(turn)
@@ -321,42 +329,94 @@ class TrackerWindow(Adw.ApplicationWindow):
         # so it's attached to whichever side's line actually matches, not
         # hardcoded onto "Du" (that previously mislabeled the opponent's
         # own mana as the player's during an opponent turn).
-        mana_text = f"   Mana {snapshot.mana.available}/{snapshot.mana.maximum}"
+        mana_text = f"  ♦ {snapshot.mana.available}/{snapshot.mana.maximum}"
         opponent_mana = mana_text if turn.player_name == "Gegner" else ""
         own_mana = mana_text if turn.player_name == "Du" else ""
 
-        opponent_header = Gtk.Label(xalign=0)
-        opponent_header.set_markup(
-            f"<b>GEGNER</b> — {snapshot.life.opponent_health} HP{opponent_mana}"
-            f" — Hand {snapshot.hand.opponent_count}"
+        box.append(
+            self._build_side_header(
+                "GEGNER",
+                f"♥ {snapshot.life.opponent_health}{opponent_mana}"
+                f"  Hand {snapshot.hand.opponent_count}",
+                accent=False,
+            )
         )
-        box.append(opponent_header)
         box.append(self._build_board_flowbox(snapshot.board.opponent))
         box.append(Gtk.Separator())
 
-        own_header = Gtk.Label(xalign=0)
-        own_header.set_markup(f"<b>DU</b> — {snapshot.life.own_health} HP{own_mana}")
+        own_header = self._build_side_header(
+            "DU", f"♥ {snapshot.life.own_health}{own_mana}", accent=True
+        )
         own_header.set_margin_top(8)
         box.append(own_header)
         box.append(self._build_board_flowbox(snapshot.board.own))
-        hand_text = " | ".join(snapshot.hand.own_cards) if snapshot.hand.own_cards else "(leer)"
-        hand_label = Gtk.Label(label=f"Hand: {hand_text}", xalign=0)
-        hand_label.set_wrap(True)
-        box.append(hand_label)
+
+        hand_caption = Gtk.Label(label="Hand", xalign=0)
+        hand_caption.add_css_class("caption")
+        hand_caption.add_css_class("dim-label")
+        hand_caption.set_margin_top(4)
+        box.append(hand_caption)
+        if snapshot.hand.own_cards:
+            box.append(self._build_hand_flowbox(snapshot.hand.own_cards))
+        else:
+            empty_hand = Gtk.Label(label="(leer)", xalign=0)
+            empty_hand.add_css_class("dim-label")
+            box.append(empty_hand)
+
+    @staticmethod
+    def _build_side_header(name: str, detail: str, *, accent: bool) -> Gtk.Box:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        name_label = Gtk.Label(label=name, xalign=0)
+        name_label.add_css_class("heading")
+        if accent:
+            # A single subtle, theme-provided accent (Adwaita's semantic
+            # ".accent" class, not a hardcoded color) on the player's own
+            # side only -- distinguishes the two sections without
+            # introducing arbitrary colors that could clash with whatever
+            # accent Omarchy's active theme happens to use.
+            name_label.add_css_class("accent")
+        detail_label = Gtk.Label(label=detail, xalign=0)
+        detail_label.add_css_class("dim-label")
+        row.append(name_label)
+        row.append(detail_label)
+        return row
 
     def _render_replay_actions(self, turn: Turn) -> None:
         box = self._replay_content_box
         if not turn.actions:
-            box.append(Gtk.Label(label="(keine Aktionen diesen Zug)", xalign=0))
+            placeholder = Gtk.Label(label="(keine Aktionen diesen Zug)", xalign=0)
+            placeholder.add_css_class("dim-label")
+            box.append(placeholder)
             return
-        for action in turn.actions:
-            headline_label = Gtk.Label(label=f"• {action.headline}", xalign=0)
+        for index, action in enumerate(turn.actions, start=1):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.set_valign(Gtk.Align.START)
+
+            number_label = Gtk.Label(label=str(index))
+            number_label.add_css_class("heading")
+            number_label.set_margin_top(2)
+            number_label.set_margin_bottom(2)
+            number_label.set_margin_start(6)
+            number_label.set_margin_end(6)
+            number_frame = Gtk.Frame()
+            number_frame.set_child(number_label)
+            number_frame.set_valign(Gtk.Align.START)
+
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            headline_label = Gtk.Label(label=action.headline, xalign=0)
             headline_label.set_wrap(True)
-            box.append(headline_label)
+            content.append(headline_label)
             for effect in action.effects:
-                effect_label = Gtk.Label(label=f"   → {effect}", xalign=0)
+                effect_label = Gtk.Label(label=effect, xalign=0)
                 effect_label.set_wrap(True)
-                box.append(effect_label)
+                effect_label.add_css_class("caption")
+                effect_label.add_css_class("dim-label")
+                effect_label.set_margin_start(8)
+                content.append(effect_label)
+
+            row.append(number_frame)
+            row.append(content)
+            box.append(row)
 
     @staticmethod
     def _build_board_flowbox(minions: list[MinionState]) -> Gtk.FlowBox:
@@ -370,16 +430,59 @@ class TrackerWindow(Adw.ApplicationWindow):
 
     @staticmethod
     def _build_minion_frame(minion: MinionState) -> Gtk.Frame:
-        lines = [minion.name, f"{minion.attack}/{minion.health}"]
+        # Name/stats/keywords deliberately don't share one font size: the
+        # numbers (what matters for "can this trade/kill?") are the most
+        # prominent, the name is de-emphasized, keywords are separate chips
+        # rather than more same-weight text.
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        name_label = Gtk.Label(label=minion.name, xalign=0.5)
+        name_label.add_css_class("caption")
+        name_label.add_css_class("dim-label")
+        name_label.set_justify(Gtk.Justification.CENTER)
+        name_label.set_wrap(True)
+        content.append(name_label)
+
+        stats_label = Gtk.Label(label=f"{minion.attack} / {minion.health}")
+        stats_label.add_css_class("title-3")
+        content.append(stats_label)
+
         if minion.keywords:
-            lines.append(", ".join(minion.keywords))
-        label = Gtk.Label(label="\n".join(lines))
-        label.set_justify(Gtk.Justification.CENTER)
-        label.set_wrap(True)
-        label.set_margin_top(4)
-        label.set_margin_bottom(4)
-        label.set_margin_start(4)
-        label.set_margin_end(4)
+            chip_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+            chip_row.set_halign(Gtk.Align.CENTER)
+            for keyword in minion.keywords:
+                chip_text = _KEYWORD_CHIP_LABELS.get(keyword, keyword)
+                chip_row.append(TrackerWindow._build_chip(chip_text))
+            content.append(chip_row)
+
+        for setter in (
+            content.set_margin_top,
+            content.set_margin_bottom,
+            content.set_margin_start,
+            content.set_margin_end,
+        ):
+            setter(6)
+        frame = Gtk.Frame()
+        frame.set_child(content)
+        return frame
+
+    @staticmethod
+    def _build_hand_flowbox(card_names: list[str]) -> Gtk.FlowBox:
+        flow = Gtk.FlowBox()
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_min_children_per_line(1)
+        flow.set_max_children_per_line(10)
+        for name in card_names:
+            flow.append(TrackerWindow._build_chip(name))
+        return flow
+
+    @staticmethod
+    def _build_chip(text: str) -> Gtk.Frame:
+        label = Gtk.Label(label=text)
+        label.add_css_class("caption")
+        label.set_margin_top(2)
+        label.set_margin_bottom(2)
+        label.set_margin_start(6)
+        label.set_margin_end(6)
         frame = Gtk.Frame()
         frame.set_child(label)
         return frame
