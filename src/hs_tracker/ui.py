@@ -460,6 +460,7 @@ class TrackerWindow(Adw.ApplicationWindow):
             number_label.set_margin_end(6)
             number_frame = Gtk.Frame()
             number_frame.set_child(number_label)
+            number_frame.set_halign(Gtk.Align.CENTER)
 
             # A thin connector below every badge but the last, so the
             # numbered list reads as one continuous sequence rather than
@@ -476,7 +477,13 @@ class TrackerWindow(Adw.ApplicationWindow):
                 # the whole numbered list out like `justify-content:
                 # space-between` instead of a tight, connected sequence.
                 connector = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-                connector.set_size_request(-1, 20)
+                # A vertical Box's child defaults to filling the column's
+                # full (perpendicular) width -- without an explicit narrow
+                # size and centered halign, this renders as a solid gray
+                # block as wide as the badge circle above it, not a thin
+                # connecting line.
+                connector.set_size_request(2, 20)
+                connector.set_halign(Gtk.Align.CENTER)
                 connector.set_margin_top(2)
                 connector.set_margin_bottom(2)
                 badge_column.append(connector)
