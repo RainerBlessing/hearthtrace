@@ -36,6 +36,10 @@ from hs_tracker.parser import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_match.power.log"
+# A second real match, captured specifically because the first fixture has
+# no weapon in it at all -- the opponent (Rogue) repeatedly equips and uses
+# a Wicked Knife via Dagger Mastery.
+WEAPON_FIXTURE = Path(__file__).parent / "fixtures" / "weapon_match.power.log"
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -287,13 +291,19 @@ def test_weapon_of_returns_none_when_no_weapon_equipped() -> None:
 
 
 def test_weapon_of_reads_attack_and_durability() -> None:
+    # Durability lives in the same HEALTH/DAMAGE pair as a minion's or
+    # hero's health, not a separate GameTag.DURABILITY -- verified against
+    # a real match's Power.log (a Wicked Knife's HEALTH=2 at creation,
+    # DAMAGE incrementing as it's used, breaking exactly when DAMAGE
+    # reaches HEALTH; GameTag.DURABILITY never appears at all despite
+    # existing as an enum value).
     game, friendly, _opponent = _make_game_with_players()
     weapon = _register_card(
         game, entity_id=1, card_id="CS2_106", controller=friendly, zone=Zone.PLAY
     )
     weapon.tag_change(GameTag.CARDTYPE, CardType.WEAPON)
     weapon.tag_change(GameTag.ATK, 3)
-    weapon.tag_change(GameTag.DURABILITY, 2)
+    weapon.tag_change(GameTag.HEALTH, 2)
     card_db, _ = load_cards()
 
     state = _weapon_of(friendly, card_db)
@@ -302,6 +312,33 @@ def test_weapon_of_reads_attack_and_durability() -> None:
     assert state.name == "Fiery War Axe"
     assert state.attack == 3
     assert state.durability == 2
+
+    weapon.tag_change(GameTag.DAMAGE, 1)  # one attack landed
+    state_after_hit = _weapon_of(friendly, card_db)
+
+    assert state_after_hit is not None
+    assert state_after_hit.durability == 1
+
+
+def test_parse_log_tracks_a_real_weapons_durability() -> None:
+    # Real-match ground truth (found while investigating why the export
+    # always showed a weapon's durability as 0): Hearthstone's Power.log
+    # never sets GameTag.DURABILITY at all -- a weapon's durability is the
+    # same HEALTH-DAMAGE pair used for minions/heroes. The opponent equips
+    # a Wicked Knife (1 attack, 2 durability) via Dagger Mastery on turn 4,
+    # uses it once (attack.effects on turn 6), and it breaks.
+    game = parse_log(WEAPON_FIXTURE)
+    turn4 = next(t for t in game.turns if t.number == 4)
+    turn6 = next(t for t in game.turns if t.number == 6)
+
+    equip = next(a for a in turn4.actions if "Dagger Mastery gespielt" in a.headline)
+
+    assert equip.effects == ["Wicked Knife ausgerüstet"]
+    assert any("Wicked Knife zerbricht" in a.effects for a in turn6.actions)
+    assert turn4.end.opponent_weapon is not None
+    assert turn4.end.opponent_weapon.attack == 1
+    assert turn4.end.opponent_weapon.durability == 1  # already used once this turn
+    assert turn6.end.opponent_weapon is None
 
 
 def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:
@@ -322,8 +359,10 @@ def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:
 
 
 def test_diff_effects_shows_weapon_durability_loss() -> None:
-    # A weapon's durability change was previously invisible: `_snapshot_
-    # entities` only ever read GameTag.HEALTH (which weapons don't carry),
+    # A weapon's durability change was previously invisible: an earlier
+    # version of `_snapshot_entities` read GameTag.DURABILITY for weapons,
+    # which real matches never actually set (durability lives in the same
+    # HEALTH/DAMAGE pair as everything else -- see `_snapshot_entities`),
     # so a before/after diff on a weapon entity always compared 0 vs 0.
     game, friendly, _opponent = _make_game_with_players()
     weapon = _register_card(
@@ -331,7 +370,8 @@ def test_diff_effects_shows_weapon_durability_loss() -> None:
     )
     weapon.tag_change(GameTag.CARDTYPE, CardType.WEAPON)
     weapon.tag_change(GameTag.ATK, 3)
-    weapon.tag_change(GameTag.DURABILITY, 1)
+    weapon.tag_change(GameTag.HEALTH, 2)
+    weapon.tag_change(GameTag.DAMAGE, 1)
     before = {1: (Zone.PLAY, 3, 2, 0, "CS2_106")}
     after = _snapshot_entities(game)
 

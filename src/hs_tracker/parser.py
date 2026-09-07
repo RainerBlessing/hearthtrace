@@ -352,10 +352,15 @@ def _weapon_of(player: Player, card_db: Any) -> WeaponState | None:
     weapon = next((e for e in player.in_zone(Zone.PLAY) if e.type == CardType.WEAPON), None)
     if weapon is None:
         return None
+    # Durability lives in the same HEALTH/DAMAGE pair as a minion's or
+    # hero's health, not a separate GameTag.DURABILITY -- see the comment
+    # on `_snapshot_entities`.
+    health = weapon.tags.get(GameTag.HEALTH, 0)
+    damage = weapon.tags.get(GameTag.DAMAGE, 0)
     return WeaponState(
         name=_card_name(weapon, card_db),
         attack=weapon.tags.get(GameTag.ATK, 0),
-        durability=weapon.tags.get(GameTag.DURABILITY, 0),
+        durability=health - damage,
     )
 
 
@@ -379,11 +384,16 @@ def _turn_snapshot(
 
 # entity_id -> (zone, attack, effective_health, armor, card_id) for every
 # real card entity (not the Game/Player objects themselves), captured just
-# before and just after a top-level block runs. attack/armor default to 0
-# for entities that don't carry those tags (spells, ...); the third slot
-# is HEALTH-DAMAGE for heroes/minions but DURABILITY for weapons (see
-# `_snapshot_entities`), defaulting to 0 for anything else (spells) --
-# harmless, since a 0-vs-0 comparison never produces a spurious diff line.
+# before and just after a top-level block runs. attack/health/armor default
+# to 0 for entities that don't carry those tags (spells, ...) -- harmless,
+# since a 0-vs-0 comparison never produces a spurious diff line. Weapon
+# durability also lives in the HEALTH/DAMAGE pair, same as a minion's or
+# hero's health -- verified directly against a real match's Power.log
+# (a Wicked Knife's HEALTH=2 at creation, DAMAGE incrementing 1 then 2 as
+# it's used, moving to Zone.GRAVEYARD exactly when DAMAGE reaches HEALTH);
+# GameTag.DURABILITY never appears in that log at all, despite existing as
+# an enum value -- an earlier version of this code read DURABILITY for
+# weapons and always got 0, since the tag is simply never set.
 # card_id is captured too (not just read live at diff time) so a target's
 # *pre-transform* identity can still be named after a Hex/Polymorph-style
 # effect has already replaced it with a different card.
@@ -398,19 +408,9 @@ def _snapshot_entities(game: Game) -> _EntitySnapshot:
             continue
         attack = entity.tags.get(GameTag.ATK, 0)
         armor = entity.tags.get(GameTag.ARMOR, 0)
-        if entity.type == CardType.WEAPON:
-            # Weapons track remaining uses directly via GameTag.DURABILITY
-            # (the value itself decrements) rather than a separate
-            # HEALTH/DAMAGE pair the way heroes and minions do -- there is
-            # no weapon in the committed fixture, so this is modeled from
-            # Hearthstone's known tag semantics, not yet verified against a
-            # real weapon-bearing match; revisit if that ever looks wrong.
-            vitality = entity.tags.get(GameTag.DURABILITY, 0)
-        else:
-            health = entity.tags.get(GameTag.HEALTH, 0)
-            damage = entity.tags.get(GameTag.DAMAGE, 0)
-            vitality = health - damage
-        snapshot[entity.id] = (entity.zone, attack, vitality, armor, entity.card_id or "")
+        health = entity.tags.get(GameTag.HEALTH, 0)
+        damage = entity.tags.get(GameTag.DAMAGE, 0)
+        snapshot[entity.id] = (entity.zone, attack, health - damage, armor, entity.card_id or "")
     return snapshot
 
 
