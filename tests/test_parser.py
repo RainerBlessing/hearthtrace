@@ -382,6 +382,26 @@ def test_extract_mulligan_excludes_the_coin() -> None:
     assert mulligan.returned == []
 
 
+def test_extract_mulligan_returns_none_when_confirmation_is_missing() -> None:
+    # A `Choices` (mulligan offer) packet with no matching `ChosenEntities`
+    # (e.g. the log got truncated between the two) must not be reported as
+    # "everything returned" -- that would present missing data as if it
+    # were an observed fact. Absence of a confident answer must stay
+    # absence, same as when no `Choices` packet exists at all.
+    game, friendly, _opponent = _make_game_with_players()
+    _register_card(game, entity_id=10, card_id="CS2_022", controller=friendly)  # Polymorph
+
+    choice = hslog_packets.Choices(
+        ts=None, entity=friendly.id, id=1, tasklist=None, type=ChoiceType.MULLIGAN, min=0, max=1
+    )
+    choice.choices = [10]
+    packet_tree = [choice]  # no ChosenEntities packet at all
+
+    mulligan = _extract_mulligan(packet_tree, game, friendly)
+
+    assert mulligan is None
+
+
 def test_extract_discoveries_finds_friendly_general_choice() -> None:
     # Built from real hslog/hearthstone packet objects (not fabricated log
     # text) -- same pattern as the `_deck_status` tests below -- since no

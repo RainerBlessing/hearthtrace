@@ -216,8 +216,9 @@ class ParsedGame:
     # `result` apart for dedup purposes.
     game_index: int
     # None when no mulligan Choices packet for the friendly player was
-    # found (e.g. an incomplete/truncated log) -- absence, not an empty
-    # mulligan, since every real match has one.
+    # found, or one was found but its confirmation (ChosenEntities) never
+    # arrived (e.g. an incomplete/truncated log cut off between the two) --
+    # absence, not an empty mulligan, since every real match has one.
     mulligan: MulliganChoice | None = None
     turns: list[Turn] = field(default_factory=list)
     # True when Hearthstone's own "Truncating log, which has reached the
@@ -1157,7 +1158,17 @@ def _extract_mulligan(
         return None
 
     chosen_entities = next((c for c in chosen if c.id == mulligan_choice.id), None)
-    kept_ids = chosen_entities.choices if chosen_entities else []
+    if chosen_entities is None:
+        # We saw the mulligan *offer* (`Choices`) but never its confirmation
+        # (`ChosenEntities`) -- e.g. a log truncated between the two. We
+        # genuinely don't know what was kept vs. returned; treating that as
+        # "everything was returned" (the old behavior of defaulting
+        # `kept_ids` to `[]`) would present a confident-looking claim built
+        # on missing data as if it were an observed fact. Same "absence, not
+        # an empty mulligan" contract as returning None when no `Choices`
+        # packet was found at all.
+        return None
+    kept_ids = chosen_entities.choices
     returned_ids = [entity_id for entity_id in mulligan_choice.choices if entity_id not in kept_ids]
 
     kept = _resolve_card_ids_excluding_coin(game, kept_ids)
