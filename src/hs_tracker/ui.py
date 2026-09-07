@@ -65,13 +65,20 @@ _KEYWORD_CHIP_LABELS = {"kann angreifen": "bereit"}
 # (a long name vs. a short one, or one extra keyword chip).
 _MINION_FRAME_WIDTH = 76
 
+# Every page's content is wrapped in an Adw.Clamp at this width: on a wide
+# or ultrawide window, the outer whitespace grows instead of the cards,
+# gaps, and line lengths themselves -- below this width (i.e. this
+# window's normal size) a Clamp does nothing at all, so this has no effect
+# on the layout already tuned for a normal-width window.
+_CONTENT_MAX_WIDTH = 1100
+
 # Adw.ToggleGroup's own vertical padding (confirmed via its real CSS node,
 # `toggle-group` containing `toggle` children -- inspected directly rather
 # than guessed) reads as noticeably tall against this window's small
 # fixed size. Trimmed here rather than left at the library default; safe
 # to fail silently (an unmatched/ineffective rule just does nothing) if a
 # future libadwaita version restructures this internally.
-_REPLAY_CSS = "toggle-group toggle { padding-top: 4px; padding-bottom: 4px; }"
+_REPLAY_CSS = "toggle-group toggle { padding-top: 2px; padding-bottom: 2px; }"
 
 
 def _install_replay_css() -> None:
@@ -145,19 +152,26 @@ class TrackerWindow(Adw.ApplicationWindow):
 
         self._history_list = Gtk.ListBox()
         history_scroller = Gtk.ScrolledWindow()
-        history_scroller.set_child(self._history_list)
+        history_scroller.set_child(self._clamp(self._history_list))
 
         replay_scroller = Gtk.ScrolledWindow()
-        replay_scroller.set_child(self._build_replay_box())
+        replay_scroller.set_child(self._clamp(self._build_replay_box()))
 
         self._stack = Gtk.Stack()
-        self._stack.add_named(tracker_box, "tracker")
+        self._stack.add_named(self._clamp(tracker_box), "tracker")
         self._stack.add_named(history_scroller, "history")
         self._stack.add_named(replay_scroller, "replay")
         toolbar_view.set_content(self._stack)
         self.set_content(toolbar_view)
 
         GLib.timeout_add_seconds(2, self._poll)
+
+    @staticmethod
+    def _clamp(child: Gtk.Widget) -> Adw.Clamp:
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(_CONTENT_MAX_WIDTH)
+        clamp.set_child(child)
+        return clamp
 
     def _build_replay_box(self) -> Gtk.Box:
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -195,11 +209,19 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._replay_stage_group.set_halign(Gtk.Align.CENTER)
 
         self._replay_content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self._replay_content_box.set_valign(Gtk.Align.START)
 
-        replay_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        replay_box.append(nav_box)
-        replay_box.append(self._replay_position_label)
-        replay_box.append(self._replay_stage_group)
+        # Nav/position/stage-toggle are one tight visual cluster (spacing
+        # 2, not the 8 used between unrelated sections) -- they're all one
+        # "where am I" readout, not three separate blocks, and packing
+        # them closer shaves real height off the header area.
+        header_cluster = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        header_cluster.append(nav_box)
+        header_cluster.append(self._replay_position_label)
+        header_cluster.append(self._replay_stage_group)
+
+        replay_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        replay_box.append(header_cluster)
         replay_box.append(Gtk.Separator())
         replay_box.append(self._replay_content_box)
 
@@ -444,11 +466,17 @@ class TrackerWindow(Adw.ApplicationWindow):
             # separate unrelated rows -- a plain Gtk.Separator, already
             # theme-consistent and subtle without any custom styling.
             badge_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-            badge_column.set_valign(Gtk.Align.FILL)
+            badge_column.set_valign(Gtk.Align.START)
             badge_column.append(number_frame)
             if index < len(turn.actions):
+                # A short *fixed*-height tick, not `vexpand=True`: an
+                # expanding separator here previously stretched to fill
+                # whatever leftover vertical space the page had (a lot, on
+                # a tall/wide window with only a few actions), spreading
+                # the whole numbered list out like `justify-content:
+                # space-between` instead of a tight, connected sequence.
                 connector = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-                connector.set_vexpand(True)
+                connector.set_size_request(-1, 20)
                 connector.set_margin_top(2)
                 connector.set_margin_bottom(2)
                 badge_column.append(connector)
@@ -521,6 +549,13 @@ class TrackerWindow(Adw.ApplicationWindow):
         frame = Gtk.Frame()
         frame.set_child(content)
         frame.set_size_request(_MINION_FRAME_WIDTH, -1)
+        # Without this, a FlowBoxChild's default fill alignment stretches
+        # the frame to its whole cell's width whenever a row has leftover
+        # space (e.g. only 2-3 minions on a wide board row) -- exactly the
+        # "cards become huge empty rectangles" symptom reported. START
+        # keeps it at its own natural/requested width regardless of how
+        # much room the row actually has.
+        frame.set_halign(Gtk.Align.START)
         return frame
 
     @staticmethod
@@ -553,6 +588,10 @@ class TrackerWindow(Adw.ApplicationWindow):
         label.set_margin_end(4)
         frame = Gtk.Frame()
         frame.set_child(label)
+        # Same reasoning as the minion frame's own halign: a FlowBox (hand
+        # chips) or box (keyword row) would otherwise stretch this to fill
+        # leftover space in a sparse row/hand instead of sizing to content.
+        frame.set_halign(Gtk.Align.START)
         return frame
 
     @staticmethod
