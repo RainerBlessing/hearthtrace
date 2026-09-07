@@ -236,6 +236,46 @@ def test_render_match_summary_includes_mana_life_hand_and_board_snapshot() -> No
     assert "- Skywall Sentinel (0/2, Spott)" in markdown
 
 
+def test_render_match_summary_omits_hand_and_armor_from_end_snapshot() -> None:
+    # Hand/armor changes are already visible as their own action/effect
+    # lines during the turn -- repeating the full Start picture in Ende
+    # would just duplicate the next turn's Start (or the previous action's
+    # diff lines), so Ende only carries Mana/Leben/Board.
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[
+            _turn(
+                number=1,
+                start=_snapshot(
+                    hand=HandState(own_cards=["Fireball"], opponent_count=3),
+                    life=LifeState(
+                        own_health=30, own_armor=5, opponent_health=30, opponent_armor=0
+                    ),
+                ),
+                end=_snapshot(
+                    hand=HandState(own_cards=[], opponent_count=4),
+                    life=LifeState(
+                        own_health=28, own_armor=5, opponent_health=25, opponent_armor=0
+                    ),
+                ),
+            )
+        ],
+    )
+
+    markdown = render_match_summary(game)
+
+    end_section = markdown.split("### Ende")[1]
+    assert "### Start" not in end_section  # sanity: split landed after Start
+    assert "Hand (" not in end_section
+    assert "Rüstung" not in end_section
+    assert "Heldenleben: Du 28 | Gegner 25" in end_section
+
+
 def test_render_match_summary_includes_actions_with_indented_effects() -> None:
     game = ParsedGame(
         own_class="MAGE",

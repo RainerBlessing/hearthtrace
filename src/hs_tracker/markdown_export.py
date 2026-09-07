@@ -51,14 +51,25 @@ def _render_hand(hand: HandState) -> list[str]:
     return lines
 
 
-def _render_snapshot(heading: str, snapshot: TurnSnapshot) -> list[str]:
+def _render_mana_and_life(snapshot: TurnSnapshot, *, include_armor: bool) -> list[str]:
     mana = snapshot.mana
     life = snapshot.life
     lines = [
-        f"### {heading}",
         f"Mana: {mana.available}/{mana.maximum} | Überladen: {mana.overload_pending}",
         f"Heldenleben: Du {life.own_health} | Gegner {life.opponent_health}",
-        f"Rüstung: Du {life.own_armor} | Gegner {life.opponent_armor}",
+    ]
+    if include_armor:
+        lines.append(f"Rüstung: Du {life.own_armor} | Gegner {life.opponent_armor}")
+    return lines
+
+
+def _render_start_snapshot(snapshot: TurnSnapshot) -> list[str]:
+    # The full decision-relevant picture: what the player could see and
+    # act on at the start of the turn -- this is what "was this turn
+    # optimal?" analysis has to be judged against.
+    return [
+        "### Start",
+        *_render_mana_and_life(snapshot, include_armor=True),
         "",
         *_render_hand(snapshot.hand),
         "",
@@ -66,7 +77,21 @@ def _render_snapshot(heading: str, snapshot: TurnSnapshot) -> list[str]:
         "",
         *_render_board("Gegner", snapshot.board.opponent),
     ]
-    return lines
+
+
+def _render_end_snapshot(snapshot: TurnSnapshot) -> list[str]:
+    # Deliberately leaner than Start: hand and armor changes are already
+    # visible as their own action/effect lines during the turn, so
+    # repeating the full picture here would just be redundant with the
+    # next turn's Start (or the previous action's diff lines).
+    return [
+        "### Ende",
+        *_render_mana_and_life(snapshot, include_armor=False),
+        "",
+        *_render_board("Du", snapshot.board.own),
+        "",
+        *_render_board("Gegner", snapshot.board.opponent),
+    ]
 
 
 def _render_actions(turn: Turn) -> list[str]:
@@ -83,11 +108,11 @@ def _render_turn(turn: Turn) -> list[str]:
     return [
         f"## Zug {turn.number} – {turn.player_name}",
         "",
-        *_render_snapshot("Start", turn.start),
+        *_render_start_snapshot(turn.start),
         "",
         *_render_actions(turn),
         "",
-        *_render_snapshot("Ende", turn.end),
+        *_render_end_snapshot(turn.end),
         "",
     ]
 
