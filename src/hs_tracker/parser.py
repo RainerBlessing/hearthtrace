@@ -28,6 +28,23 @@ _ACTION_BLOCK_TYPES = frozenset(
     {BlockType.PLAY, BlockType.ATTACK, BlockType.POWER, BlockType.FATIGUE}
 )
 
+# A death, and the deathrattle it triggers, resolve as their own *separate*
+# top-level blocks, siblings of (not nested inside) the block that caused
+# the death -- verified against a real match's packet tree: an ATTACK
+# block killing a minion is followed by a top-level BlockType.DEATHS block
+# (bookkeeping: moves it to the graveyard) and *then* a top-level
+# BlockType.TRIGGER block with `trigger_keyword == GameTag.DEATHRATTLE`
+# (the deathrattle's actual effect, e.g. Twilight Egg hatching into
+# Accelerated Whelp). Neither has a meaningful "actor" entity for a
+# headline of its own, so both are tracked here purely to fold their
+# effects into whichever action most recently ran instead of losing them.
+def _is_deathrattle_trigger(block: Any) -> bool:
+    return block.type == BlockType.TRIGGER and block.trigger_keyword == GameTag.DEATHRATTLE
+
+
+def _is_merge_only_block(block: Any) -> bool:
+    return block.type == BlockType.DEATHS or _is_deathrattle_trigger(block)
+
 # (GameTag, German label) for the minion keywords worth surfacing in a board
 # snapshot. Not exhaustive -- only the ones that commonly change a decision
 # (per the user's own guidance: "nicht jeder interne Hearthstone-State muss
@@ -792,7 +809,9 @@ class _TurnBuilder:
         )
 
     def before_block(self, block: Any, game: Game) -> tuple[_EntitySnapshot, int | None] | None:
-        if block.type not in _ACTION_BLOCK_TYPES or self._current is None:
+        if self._current is None:
+            return None
+        if block.type not in _ACTION_BLOCK_TYPES and not _is_merge_only_block(block):
             return None
         controller = self._block_controller(block, game)
         mana_before = _mana_state(controller).available if controller is not None else None
@@ -806,6 +825,9 @@ class _TurnBuilder:
         me, _opponent = self._players(game)
         before_entities, mana_before = before
         after_entities = _snapshot_entities(game)
+        if _is_merge_only_block(block):
+            self._merge_effects_into_last_action(game, me, before_entities, after_entities)
+            return
         controller = self._block_controller(block, game)
         # `_mana_state` already clamps at 0 -- trust the game's own tags
         # rather than computing a cost ourselves (a card's *actual* cost,
@@ -815,6 +837,24 @@ class _TurnBuilder:
             block, game, self._namer, me, before_entities, after_entities, mana_before, mana_after
         )
         self._current.actions.append(action)
+
+    def _merge_effects_into_last_action(
+        self, game: Game, friendly_player: Player, before: _EntitySnapshot, after: _EntitySnapshot
+    ) -> None:
+        """A death's bookkeeping and its deathrattle's effect belong to
+        whichever action caused them, not their own separate, actor-less
+        entry."""
+        assert self._current is not None
+        lines = _diff_effects(game, self._namer, friendly_player, before, after)
+        if not lines:
+            return
+        if self._current.actions:
+            self._current.actions[-1].effects.extend(lines)
+        else:
+            # No preceding action this turn to attach to (e.g. a delayed
+            # deathrattle firing with nothing else having happened yet) --
+            # surface it on its own rather than dropping it silently.
+            self._current.actions.append(Action(headline="Folgeeffekt", effects=lines))
 
     @staticmethod
     def _block_controller(block: Any, game: Game) -> Player | None:

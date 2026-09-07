@@ -9,16 +9,25 @@ from hslog import packets as hslog_packets
 
 from hs_tracker.parser import (
     Action,
+    BoardState,
+    HandState,
+    LifeState,
+    ManaState,
     NoGameFoundError,
+    Turn,
+    TurnSnapshot,
     _build_attack_action,
     _deck_status,
     _diff_effects,
     _extract_discoveries,
     _extract_mulligan,
     _InstanceNamer,
+    _is_deathrattle_trigger,
+    _is_merge_only_block,
     _mana_state,
     _snapshot_entities,
     _target_suffix,
+    _TurnBuilder,
     parse_log,
 )
 
@@ -43,6 +52,75 @@ def _register_card(
     card.tag_change(GameTag.CONTROLLER, controller.player_id)
     game.register_entity(card)
     return card
+
+
+def test_is_merge_only_block_identifies_deaths_and_deathrattle_trigger() -> None:
+    # A death and its deathrattle resolve as their own separate top-level
+    # blocks (verified against a real match's packet tree) -- both must be
+    # recognized as "fold into the causing action", not just DEATHS alone.
+    from hearthstone.enums import BlockType
+
+    deaths = SimpleNamespace(type=BlockType.DEATHS, trigger_keyword=None)
+    deathrattle_trigger = SimpleNamespace(
+        type=BlockType.TRIGGER, trigger_keyword=GameTag.DEATHRATTLE
+    )
+    unrelated_trigger = SimpleNamespace(type=BlockType.TRIGGER, trigger_keyword=None)
+    play = SimpleNamespace(type=BlockType.PLAY, trigger_keyword=None)
+
+    assert _is_merge_only_block(deaths) is True
+    assert _is_deathrattle_trigger(deathrattle_trigger) is True
+    assert _is_merge_only_block(deathrattle_trigger) is True
+    # An ordinary trigger (e.g. "start of turn") must NOT be swept into
+    # whatever action happened to run right before it.
+    assert _is_merge_only_block(unrelated_trigger) is False
+    assert _is_merge_only_block(play) is False
+
+
+def _make_turn_snapshot() -> TurnSnapshot:
+    return TurnSnapshot(
+        mana=ManaState(available=0, maximum=0, locked=0, overload_pending=0),
+        life=LifeState(own_health=30, own_armor=0, opponent_health=30, opponent_armor=0),
+        hand=HandState(own_cards=[], opponent_count=0),
+        board=BoardState(own=[], opponent=[]),
+    )
+
+
+def test_turn_builder_merges_deathrattle_effects_into_causing_action() -> None:
+    # A minion's death (BlockType.DEATHS bookkeeping) and its deathrattle's
+    # actual effect (a separate BlockType.TRIGGER block) must fold into
+    # the attack/play that caused them -- otherwise a deathrattle-summoned
+    # minion appears on the board with no explanation at all.
+    game, friendly, opponent = _make_game_with_players()
+    attacker = _register_card(
+        game, entity_id=1, card_id="CORE_CS2_189", controller=friendly, zone=Zone.PLAY
+    )
+    attacker.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    attacker.tag_change(GameTag.ATK, 1)
+    attacker.tag_change(GameTag.HEALTH, 1)
+    summoned = _register_card(
+        game, entity_id=2, card_id="CORE_EX1_304", controller=friendly, zone=Zone.PLAY
+    )
+    summoned.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    summoned.tag_change(GameTag.ATK, 3)
+    summoned.tag_change(GameTag.HEALTH, 2)
+
+    card_db, _ = load_cards()
+    builder = _TurnBuilder(friendly.player_id, card_db)
+    builder._current = Turn(  # noqa: SLF001 - exercising internal merge logic directly
+        number=1,
+        player_name="Du",
+        opening_draws=[],
+        start=_make_turn_snapshot(),
+        actions=[Action(headline="Du: Elven Archer #1 → Void Terror #1")],
+        end=_make_turn_snapshot(),
+    )
+
+    before: dict = {1: (Zone.PLAY, 1, 1, 0, "CORE_CS2_189")}
+    after = _snapshot_entities(game)
+
+    builder._merge_effects_into_last_action(game, friendly, before, after)  # noqa: SLF001
+
+    assert builder._current.actions[-1].effects == ["Void Terror #1 beschworen"]  # noqa: SLF001
 
 
 def test_mana_state_never_reports_negative_available_mana() -> None:
