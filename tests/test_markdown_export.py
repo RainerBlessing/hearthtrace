@@ -67,6 +67,37 @@ def test_render_match_summary_includes_result_and_turn_heading() -> None:
     assert "## Zug 1 – Du" in markdown
 
 
+def test_render_match_summary_notes_log_truncation() -> None:
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        log_truncated=True,
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Größenlimit" in markdown
+
+
+def test_render_match_summary_omits_truncation_note_by_default() -> None:
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Größenlimit" not in markdown
+
+
 def test_render_match_summary_uses_du_and_gegner_not_raw_account_names() -> None:
     # Action headlines must never leak the user's real Battle.net account
     # name (or the opponent's) into text meant to be pasted into an AI chat.

@@ -140,6 +140,14 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
         f"**{deck_label}:** {', '.join(deck_names)} ({len(deck_names)} Karten)",
         "",
     ]
+    if game.log_truncated:
+        lines += [
+            "**Hinweis:** Hearthstones eigenes Power.log hat während dieser Partie sein"
+            " Größenlimit (10 MB) erreicht; Hearthstone stellt das Schreiben ab diesem"
+            " Punkt komplett ein. Spätere Ereignisse (ggf. auch das Ende der Partie)"
+            " fehlen dadurch möglicherweise.",
+            "",
+        ]
     if game.mulligan is not None:
         kept_names = _card_names(game.mulligan.kept, card_db)
         returned_names = _card_names(game.mulligan.returned, card_db)

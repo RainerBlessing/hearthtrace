@@ -112,9 +112,14 @@ class TrackerWindow(Adw.ApplicationWindow):
         return True
 
     def _refresh_deck_list(self, game: ParsedGame) -> None:
-        self._status_label.set_label(
-            f"{game.own_class} vs. {game.opponent_class} — Ergebnis: {game.result}"
-        )
+        status = f"{game.own_class} vs. {game.opponent_class} — Ergebnis: {game.result}"
+        if game.log_truncated and game.result not in _FINISHED_RESULTS:
+            # Hearthstone itself stopped writing to Power.log once it hit
+            # its 10MB size limit -- `game.result` is whatever it last was
+            # before that, not the match's true (possibly already decided)
+            # current state. Showing it bare would be actively misleading.
+            status += " (Hearthstone-Log abgeschnitten — Status evtl. veraltet)"
+        self._status_label.set_label(status)
         while (row := self._deck_list.get_row_at_index(0)) is not None:
             self._deck_list.remove(row)
         for card_id in remaining_deck(game):

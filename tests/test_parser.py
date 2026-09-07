@@ -521,6 +521,8 @@ def test_parse_log_skips_unparseable_lines_instead_of_failing_the_whole_match(
 
     assert game.result == expected.result
     assert len(game.turns) == len(expected.turns)
+    assert game.log_truncated is True
+    assert expected.log_truncated is False
 
 
 def test_parse_log_raises_no_game_found_error_when_log_has_no_create_game(

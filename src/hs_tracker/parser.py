@@ -191,6 +191,16 @@ class ParsedGame:
     # mulligan, since every real match has one.
     mulligan: MulliganChoice | None = None
     turns: list[Turn] = field(default_factory=list)
+    # True when Hearthstone's own "Truncating log, which has reached the
+    # size limit of 10000KB" banner was found in the file: past that
+    # point, Hearthstone itself stops writing to Power.log entirely (not
+    # a parsing failure -- observed directly: the banner is the literal
+    # last line of the file, with nothing after it and no new session
+    # folder created). Everything from there on, including the match's
+    # true final result, was simply never recorded anywhere -- no parser
+    # can recover it. Callers should surface this rather than presenting
+    # a stale non-terminal `result` (e.g. "PLAYING") as if it were current.
+    log_truncated: bool = False
 
 
 def _class_name(player: Player, card_db: Any) -> str:
@@ -1042,31 +1052,40 @@ def _insert_opening_draws(turns: list[Turn]) -> None:
         current.opening_draws = _opening_draw_lines(previous.end.hand, current.start.hand)
 
 
-def _read_log_leniently(parser: LogParser, path: Path) -> None:
-    """Feed `path` to `parser` one line at a time, skipping any single line
-    hslog can't parse instead of aborting the whole read.
+_LOG_TRUNCATION_MARKER = "Truncating log"
 
-    Real-world observed cause (a genuine hslog gap, not a Hearthstone log
-    corruption): once Power.log hits its 10MB size limit, Hearthstone
-    itself writes a non-log "Truncating log..." banner straight into the
-    file, which hslog's tokenizer was never built to recognize -- and
-    `LogParser.read()`'s plain `for line in fp: self.read_line(line)` loop
-    has no tolerance for a single bad line, aborting the entire match
+
+def _read_log_leniently(parser: LogParser, path: Path) -> bool:
+    """Feed `path` to `parser` one line at a time, skipping any single line
+    hslog can't parse instead of aborting the whole read. Returns whether
+    Hearthstone's own log-truncation banner was found (see `ParsedGame.
+    log_truncated`).
+
+    Real-world observed cause of the skip (a genuine hslog gap, not a
+    Hearthstone log corruption): once Power.log hits its 10MB size limit,
+    Hearthstone itself writes a non-log "Truncating log..." banner straight
+    into the file, which hslog's tokenizer was never built to recognize --
+    and `LogParser.read()`'s plain `for line in fp: self.read_line(line)`
+    loop has no tolerance for a single bad line, aborting the entire match
     (including everything already read) over it. For a live tracker,
     losing a bit of precision from one skipped line is far better than
     losing all tracking for the rest of a long session.
     """
+    truncated = False
     with path.open() as f:
         for line in f:
+            if _LOG_TRUNCATION_MARKER in line:
+                truncated = True
             try:
                 parser.read_line(line)
             except ParsingError:
                 continue
+    return truncated
 
 
 def parse_log(path: Path) -> ParsedGame:
     parser = LogParser()
-    _read_log_leniently(parser, path)
+    log_truncated = _read_log_leniently(parser, path)
 
     if not parser.games:
         raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
@@ -1095,4 +1114,5 @@ def parse_log(path: Path) -> ParsedGame:
         game_index=len(parser.games),
         mulligan=mulligan,
         turns=builder.turns,
+        log_truncated=log_truncated,
     )
