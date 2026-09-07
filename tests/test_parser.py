@@ -496,6 +496,33 @@ def test_deck_status_keeps_a_mulliganed_and_never_redrawn_card_as_remaining() ->
     assert not_in_deck == []
 
 
+def test_parse_log_skips_unparseable_lines_instead_of_failing_the_whole_match(
+    tmp_path: Path,
+) -> None:
+    # Real-world observed cause: once Power.log hits its 10MB size limit,
+    # Hearthstone writes a non-log "Truncating log..." banner straight
+    # into the file, which hslog's tokenizer can't parse -- and used to
+    # abort the *entire* match over that one line. Insert the exact real
+    # banner text into a copy of the real fixture and confirm parsing
+    # still succeeds with the same result as the unmodified fixture.
+    banner = (
+        "\n\n"
+        "==================================================================\n"
+        "Truncating log, which has reached the size limit of 10000KB\n"
+        "==================================================================\n"
+    )
+    lines = FIXTURE.read_text(encoding="utf-8").splitlines(keepends=True)
+    midpoint = len(lines) // 2
+    corrupted = tmp_path / "Power.log"
+    corrupted.write_text("".join(lines[:midpoint]) + banner + "".join(lines[midpoint:]))
+
+    game = parse_log(corrupted)
+    expected = parse_log(FIXTURE)
+
+    assert game.result == expected.result
+    assert len(game.turns) == len(expected.turns)
+
+
 def test_parse_log_raises_no_game_found_error_when_log_has_no_create_game(
     tmp_path: Path,
 ) -> None:

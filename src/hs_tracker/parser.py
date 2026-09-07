@@ -15,6 +15,7 @@ from hearthstone.enums import BlockType, CardType, ChoiceType, GameTag, PlayStat
 from hearthstone.utils import get_original_card_id
 from hslog import LogParser
 from hslog import packets as hslog_packets
+from hslog.exceptions import ParsingError
 from hslog.export import EntityTreeExporter, FriendlyPlayerExporter
 from hslog.player import coerce_to_entity_id
 
@@ -1041,10 +1042,31 @@ def _insert_opening_draws(turns: list[Turn]) -> None:
         current.opening_draws = _opening_draw_lines(previous.end.hand, current.start.hand)
 
 
+def _read_log_leniently(parser: LogParser, path: Path) -> None:
+    """Feed `path` to `parser` one line at a time, skipping any single line
+    hslog can't parse instead of aborting the whole read.
+
+    Real-world observed cause (a genuine hslog gap, not a Hearthstone log
+    corruption): once Power.log hits its 10MB size limit, Hearthstone
+    itself writes a non-log "Truncating log..." banner straight into the
+    file, which hslog's tokenizer was never built to recognize -- and
+    `LogParser.read()`'s plain `for line in fp: self.read_line(line)` loop
+    has no tolerance for a single bad line, aborting the entire match
+    (including everything already read) over it. For a live tracker,
+    losing a bit of precision from one skipped line is far better than
+    losing all tracking for the rest of a long session.
+    """
+    with path.open() as f:
+        for line in f:
+            try:
+                parser.read_line(line)
+            except ParsingError:
+                continue
+
+
 def parse_log(path: Path) -> ParsedGame:
     parser = LogParser()
-    with path.open() as f:
-        parser.read(f)
+    _read_log_leniently(parser, path)
 
     if not parser.games:
         raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
