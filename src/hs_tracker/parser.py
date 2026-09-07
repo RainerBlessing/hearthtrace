@@ -379,8 +379,10 @@ def _turn_snapshot(
 
 # entity_id -> (zone, attack, effective_health, armor, card_id) for every
 # real card entity (not the Game/Player objects themselves), captured just
-# before and just after a top-level block runs. attack/health/armor default
-# to 0 for entities that don't carry those tags (spells, weapons, ...) --
+# before and just after a top-level block runs. attack/armor default to 0
+# for entities that don't carry those tags (spells, ...); the third slot
+# is HEALTH-DAMAGE for heroes/minions but DURABILITY for weapons (see
+# `_snapshot_entities`), defaulting to 0 for anything else (spells) --
 # harmless, since a 0-vs-0 comparison never produces a spurious diff line.
 # card_id is captured too (not just read live at diff time) so a target's
 # *pre-transform* identity can still be named after a Hex/Polymorph-style
@@ -471,27 +473,37 @@ def _zone_label(zone: Zone) -> str:
     return " (Hand)" if zone == Zone.HAND else ""
 
 
-def _minion_zone_transition_line(name: str, zone_before: Zone, zone_after: Zone) -> str | None:
+def _play_zone_transition_line(
+    name: str, zone_before: Zone, zone_after: Zone, *, die_verb: str, enter_verb: str
+) -> str | None:
+    """Shared shape for anything that lives in Zone.PLAY (minions,
+    weapons): leaving play to the graveyard, bouncing back to hand (same
+    generic "Board -> Hand" wording either way -- its board-modified stats
+    are gone, not "changed", so this replaces the generic stat-diff line),
+    or entering play from anywhere else (a freshly-arrived entity's stats
+    are already visible in the board/weapon snapshot, no need to also
+    print a 0/0 -> atk/hp diff). Only the death/entry verbs differ by
+    entity type ("stirbt"/"beschworen" for minions, "zerbricht"/
+    "ausgerüstet" for weapons)."""
     if zone_before == Zone.PLAY and zone_after == Zone.GRAVEYARD:
-        return f"{name} stirbt"
+        return f"{name} {die_verb}"
     if zone_before == Zone.PLAY and zone_after == Zone.HAND:
-        # e.g. bounced back by a triggered Secret mid-attack, or a
-        # "return to hand" effect -- its board-modified stats are gone,
-        # not "changed", so this replaces the generic stat-diff line.
         return f"{name}: Board → Hand"
     if zone_after == Zone.PLAY and zone_before != Zone.PLAY:
-        # A freshly-entered-play minion's stats are already visible in the
-        # board snapshot -- no need to also print a 0/0 -> atk/hp diff.
-        return f"{name} beschworen"
+        return f"{name} {enter_verb}"
     return None
+
+
+def _minion_zone_transition_line(name: str, zone_before: Zone, zone_after: Zone) -> str | None:
+    return _play_zone_transition_line(
+        name, zone_before, zone_after, die_verb="stirbt", enter_verb="beschworen"
+    )
 
 
 def _weapon_zone_transition_line(name: str, zone_before: Zone, zone_after: Zone) -> str | None:
-    if zone_before == Zone.PLAY and zone_after == Zone.GRAVEYARD:
-        return f"{name} zerbricht"
-    if zone_after == Zone.PLAY and zone_before != Zone.PLAY:
-        return f"{name} ausgerüstet"
-    return None
+    return _play_zone_transition_line(
+        name, zone_before, zone_after, die_verb="zerbricht", enter_verb="ausgerüstet"
+    )
 
 
 def _zone_transition_line(
@@ -860,12 +872,13 @@ class _TurnBuilder:
         # First-touch order of entity ids since the currently open top-level
         # block started (see `on_entity_touched`) -- lets effect lines be
         # shown in the order things actually happened, not incidentally in
-        # `_snapshot_entities`' creation-id order. Only accumulated while
-        # `_tracking` is on (i.e. between a tracked block's `before_block`
-        # and `after_block`), so an untracked block or the gap between
+        # `_snapshot_entities`' creation-id order. `None` means "not
+        # currently inside a tracked block" (a single field, not a separate
+        # order-list + tracking-flag pair, so there's nothing to forget to
+        # toggle in lockstep) -- an untracked block or the gap between
         # blocks never pollutes the next tracked block's order.
-        self._touch_order: list[int] = []
-        self._tracking = False
+        self._touch_order: list[int] | None = None
+        self._touched_ids: set[int] = set()
         self.turns: list[Turn] = []
 
     def _players(self, game: Game) -> tuple[Player, Player]:
@@ -920,7 +933,7 @@ class _TurnBuilder:
         controller = self._block_controller(block, game)
         mana_before = _mana_state(controller).available if controller is not None else None
         self._touch_order = []
-        self._tracking = True
+        self._touched_ids = set()
         return _snapshot_entities(game), mana_before
 
     def on_entity_touched(self, entity_id: int) -> None:
@@ -928,18 +941,21 @@ class _TurnBuilder:
         a tracked top-level block -- records the order entities were first
         touched (TAG_CHANGE, or the entity's own creation/reveal), which is
         the actual causal order, unlike `_snapshot_entities`' before/after
-        dict order."""
-        if self._tracking and entity_id not in self._touch_order:
-            self._touch_order.append(entity_id)
+        dict order. `_touched_ids` gives O(1) dedup -- a block touching many
+        entities (a board wipe, a cleave) would otherwise make this an O(n)
+        scan per touch, O(n^2) for the whole block."""
+        if self._touch_order is None or entity_id in self._touched_ids:
+            return
+        self._touched_ids.add(entity_id)
+        self._touch_order.append(entity_id)
 
     def after_block(
         self, block: Any, game: Game, before: tuple[_EntitySnapshot, int | None]
     ) -> None:
         if self._current is None:
             return
-        self._tracking = False
         order = self._touch_order
-        self._touch_order = []
+        self._touch_order = None
         me, _opponent = self._players(game)
         before_entities, mana_before = before
         after_entities = _snapshot_entities(game)
@@ -1001,6 +1017,20 @@ class _TurnBuilder:
         self._current = None
 
 
+# Packet types that mutate an existing entity (or bring a new one into
+# being) without needing any further reaction here beyond recording the
+# touch -- unlike TagChange, which also drives the turn-boundary hooks
+# below. Dispatched generically via `export_packet` instead of one
+# override per type, since all four would otherwise be identical
+# boilerplate (call super(), then touch).
+_TOUCH_ONLY_PACKET_TYPES = (
+    hslog_packets.FullEntity,
+    hslog_packets.ShowEntity,
+    hslog_packets.HideEntity,
+    hslog_packets.ChangeEntity,
+)
+
+
 class _SnapshotEntityTreeExporter(EntityTreeExporter):
     def __init__(self, packet_tree: Any, player_manager: Any, builder: _TurnBuilder) -> None:
         super().__init__(packet_tree, player_manager=player_manager)
@@ -1010,6 +1040,12 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
     def _touch(self, packet: Any) -> None:
         self._builder.on_entity_touched(int(coerce_to_entity_id(packet.entity)))
 
+    def export_packet(self, packet: Any) -> Any:
+        result = super().export_packet(packet)
+        if isinstance(packet, _TOUCH_ONLY_PACKET_TYPES):
+            self._touch(packet)
+        return result
+
     def handle_tag_change(self, packet: Any) -> Any:
         entity = super().handle_tag_change(packet)
         self._touch(packet)
@@ -1018,26 +1054,6 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
                 self._builder.on_turn_number(packet.value, self.game)
             elif packet.tag == GameTag.STEP and packet.value == Step.MAIN_ACTION:
                 self._builder.on_turn_ready(self.game)
-        return entity
-
-    def handle_full_entity(self, packet: Any) -> Any:
-        entity = super().handle_full_entity(packet)
-        self._touch(packet)
-        return entity
-
-    def handle_show_entity(self, packet: Any) -> Any:
-        entity = super().handle_show_entity(packet)
-        self._touch(packet)
-        return entity
-
-    def handle_hide_entity(self, packet: Any) -> Any:
-        entity = super().handle_hide_entity(packet)
-        self._touch(packet)
-        return entity
-
-    def handle_change_entity(self, packet: Any) -> Any:
-        entity = super().handle_change_entity(packet)
-        self._touch(packet)
         return entity
 
     def handle_block(self, packet: Any) -> None:

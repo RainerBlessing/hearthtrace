@@ -313,6 +313,12 @@ def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:
         _zone_transition_line(CardType.WEAPON, "Fiery War Axe", True, Zone.PLAY, Zone.GRAVEYARD)
         == "Fiery War Axe zerbricht"
     )
+    # Same generic "Board -> Hand" wording as a bounced minion -- e.g. an
+    # effect that returns an equipped weapon to hand instead of breaking it.
+    assert (
+        _zone_transition_line(CardType.WEAPON, "Fiery War Axe", True, Zone.PLAY, Zone.HAND)
+        == "Fiery War Axe: Board → Hand"
+    )
 
 
 def test_diff_effects_shows_weapon_durability_loss() -> None:
