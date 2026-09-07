@@ -610,8 +610,17 @@ _BLOCK_VERBS = {
 
 
 def _mana_headline_suffix(mana_before: int | None, mana_after: int | None) -> str:
-    if mana_before is None or mana_after is None or mana_before == mana_after:
+    if mana_before is None or mana_after is None:
         return ""
+    if mana_before == mana_after:
+        # Net 0 mana spent -- could be a genuinely free action, or a cost
+        # discount/refund that happened to net out. Either way, that's a
+        # real, decision-relevant fact (verified live against a real
+        # match: a discounted Bloodmage Thalnos costing 0 despite its
+        # printed cost of 2) -- worth saying explicitly rather than
+        # silently showing no mana note at all, which reads as "not
+        # tracked" rather than "confirmed free".
+        return " (Kosten: 0)"
     return f" (Mana: {mana_before} → {mana_after})"
 
 

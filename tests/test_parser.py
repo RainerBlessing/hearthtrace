@@ -24,6 +24,7 @@ from hs_tracker.parser import (
     _InstanceNamer,
     _is_deathrattle_trigger,
     _is_merge_only_block,
+    _mana_headline_suffix,
     _mana_state,
     _snapshot_entities,
     _target_suffix,
@@ -52,6 +53,19 @@ def _register_card(
     card.tag_change(GameTag.CONTROLLER, controller.player_id)
     game.register_entity(card)
     return card
+
+
+def test_mana_headline_suffix_says_cost_zero_for_a_net_zero_change() -> None:
+    # Verified against a real match (live-hook traced): a discounted
+    # Bloodmage Thalnos, printed cost 2, was actually charged 0 -- mana
+    # available before and after the block were identical (0 == 0). Net 0
+    # mana spent is a real, decision-relevant fact and should say so
+    # explicitly, not look like mana simply wasn't tracked for this action.
+    assert _mana_headline_suffix(0, 0) == " (Kosten: 0)"
+    assert _mana_headline_suffix(4, 4) == " (Kosten: 0)"
+    assert _mana_headline_suffix(4, 2) == " (Mana: 4 → 2)"
+    assert _mana_headline_suffix(None, 2) == ""
+    assert _mana_headline_suffix(4, None) == ""
 
 
 def test_is_merge_only_block_identifies_deaths_and_deathrattle_trigger() -> None:
