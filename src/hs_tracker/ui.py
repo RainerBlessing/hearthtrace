@@ -60,6 +60,29 @@ _REPLAY_STAGES = (_REPLAY_STAGE_START, _REPLAY_STAGE_ACTIONS, _REPLAY_STAGE_END)
 # alternative worth using; every other keyword is already short.
 _KEYWORD_CHIP_LABELS = {"kann angreifen": "bereit"}
 
+# Fixed width for a board minion's frame, so the board reads as a steady
+# grid instead of every box being exactly as wide as its own longest line
+# (a long name vs. a short one, or one extra keyword chip).
+_MINION_FRAME_WIDTH = 76
+
+# Adw.ToggleGroup's own vertical padding (confirmed via its real CSS node,
+# `toggle-group` containing `toggle` children -- inspected directly rather
+# than guessed) reads as noticeably tall against this window's small
+# fixed size. Trimmed here rather than left at the library default; safe
+# to fail silently (an unmatched/ineffective rule just does nothing) if a
+# future libadwaita version restructures this internally.
+_REPLAY_CSS = "toggle-group toggle { padding-top: 4px; padding-bottom: 4px; }"
+
+
+def _install_replay_css() -> None:
+    provider = Gtk.CssProvider()
+    provider.load_from_string(_REPLAY_CSS)
+    display = Gdk.Display.get_default()
+    if display is not None:
+        Gtk.StyleContext.add_provider_for_display(
+            display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
 
 class TrackerWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application, config: Config) -> None:
@@ -71,6 +94,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         # node name; the actual Wayland/Hyprland window class comes from
         # the application id passed to `Adw.Application` in app.py.
         self.set_name("hs-tracker")
+        _install_replay_css()
 
         self._config = config
         self._last_log_path: Path | None = None
@@ -329,15 +353,16 @@ class TrackerWindow(Adw.ApplicationWindow):
         # so it's attached to whichever side's line actually matches, not
         # hardcoded onto "Du" (that previously mislabeled the opponent's
         # own mana as the player's during an opponent turn).
-        mana_text = f"  ♦ {snapshot.mana.available}/{snapshot.mana.maximum}"
-        opponent_mana = mana_text if turn.player_name == "Gegner" else ""
-        own_mana = mana_text if turn.player_name == "Du" else ""
+        mana_text = f"Mana {snapshot.mana.available}/{snapshot.mana.maximum}"
+        opponent_mana = mana_text if turn.player_name == "Gegner" else None
+        own_mana = mana_text if turn.player_name == "Du" else None
 
         box.append(
             self._build_side_header(
                 "GEGNER",
-                f"♥ {snapshot.life.opponent_health}{opponent_mana}"
-                f"  Hand {snapshot.hand.opponent_count}",
+                self._format_side_detail(
+                    snapshot.life.opponent_health, opponent_mana, snapshot.hand.opponent_count
+                ),
                 accent=False,
             )
         )
@@ -345,7 +370,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         box.append(Gtk.Separator())
 
         own_header = self._build_side_header(
-            "DU", f"♥ {snapshot.life.own_health}{own_mana}", accent=True
+            "DU", self._format_side_detail(snapshot.life.own_health, own_mana, None), accent=True
         )
         own_header.set_margin_top(8)
         box.append(own_header)
@@ -362,6 +387,19 @@ class TrackerWindow(Adw.ApplicationWindow):
             empty_hand = Gtk.Label(label="(leer)", xalign=0)
             empty_hand.add_css_class("dim-label")
             box.append(empty_hand)
+
+    @staticmethod
+    def _format_side_detail(hp: int, mana: str | None, hand_count: int | None) -> str:
+        # Fixed labels ("Mana", "Hand") for every segment except HP's own
+        # heart glyph, joined with one consistent separator -- so the line
+        # reads as a small table of facts, not a string of differently-
+        # shaped tokens.
+        parts = [f"♥ {hp}"]
+        if mana is not None:
+            parts.append(mana)
+        if hand_count is not None:
+            parts.append(f"Hand {hand_count}")
+        return "   ".join(parts)
 
     @staticmethod
     def _build_side_header(name: str, detail: str, *, accent: bool) -> Gtk.Box:
@@ -400,7 +438,20 @@ class TrackerWindow(Adw.ApplicationWindow):
             number_label.set_margin_end(6)
             number_frame = Gtk.Frame()
             number_frame.set_child(number_label)
-            number_frame.set_valign(Gtk.Align.START)
+
+            # A thin connector below every badge but the last, so the
+            # numbered list reads as one continuous sequence rather than
+            # separate unrelated rows -- a plain Gtk.Separator, already
+            # theme-consistent and subtle without any custom styling.
+            badge_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            badge_column.set_valign(Gtk.Align.FILL)
+            badge_column.append(number_frame)
+            if index < len(turn.actions):
+                connector = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+                connector.set_vexpand(True)
+                connector.set_margin_top(2)
+                connector.set_margin_bottom(2)
+                badge_column.append(connector)
 
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             headline_label = Gtk.Label(label=action.headline, xalign=0)
@@ -410,11 +461,15 @@ class TrackerWindow(Adw.ApplicationWindow):
                 effect_label = Gtk.Label(label=effect, xalign=0)
                 effect_label.set_wrap(True)
                 effect_label.add_css_class("caption")
-                effect_label.add_css_class("dim-label")
+                # A tick lighter than the theme's own ".dim-label" (which
+                # reads as too dark for a secondary line at this size) --
+                # a plain opacity reduction instead of overriding that
+                # semantic class app-wide.
+                effect_label.set_opacity(0.75)
                 effect_label.set_margin_start(8)
                 content.append(effect_label)
 
-            row.append(number_frame)
+            row.append(badge_column)
             row.append(content)
             box.append(row)
 
@@ -432,9 +487,11 @@ class TrackerWindow(Adw.ApplicationWindow):
     def _build_minion_frame(minion: MinionState) -> Gtk.Frame:
         # Name/stats/keywords deliberately don't share one font size: the
         # numbers (what matters for "can this trade/kill?") are the most
-        # prominent, the name is de-emphasized, keywords are separate chips
-        # rather than more same-weight text.
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        # prominent, the name is de-emphasized, keywords are separate,
+        # smaller chips pulled close to the stats rather than more
+        # same-weight text. A fixed frame width keeps the whole board a
+        # steady grid instead of every box sized to its own longest line.
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         name_label = Gtk.Label(label=minion.name, xalign=0.5)
         name_label.add_css_class("caption")
         name_label.add_css_class("dim-label")
@@ -451,7 +508,7 @@ class TrackerWindow(Adw.ApplicationWindow):
             chip_row.set_halign(Gtk.Align.CENTER)
             for keyword in minion.keywords:
                 chip_text = _KEYWORD_CHIP_LABELS.get(keyword, keyword)
-                chip_row.append(TrackerWindow._build_chip(chip_text))
+                chip_row.append(TrackerWindow._build_keyword_chip(chip_text))
             content.append(chip_row)
 
         for setter in (
@@ -463,6 +520,7 @@ class TrackerWindow(Adw.ApplicationWindow):
             setter(6)
         frame = Gtk.Frame()
         frame.set_child(content)
+        frame.set_size_request(_MINION_FRAME_WIDTH, -1)
         return frame
 
     @staticmethod
@@ -472,17 +530,27 @@ class TrackerWindow(Adw.ApplicationWindow):
         flow.set_min_children_per_line(1)
         flow.set_max_children_per_line(10)
         for name in card_names:
-            flow.append(TrackerWindow._build_chip(name))
+            flow.append(TrackerWindow._build_hand_chip(name))
         return flow
 
     @staticmethod
-    def _build_chip(text: str) -> Gtk.Frame:
+    def _build_hand_chip(text: str) -> Gtk.Frame:
+        # Same chip shape as a keyword badge, but visually quieter (lower
+        # opacity, no separate weight class) than a board minion's frame --
+        # hand cards are reference information here, not the thing being
+        # actively evaluated the way board state is.
+        frame = TrackerWindow._build_keyword_chip(text)
+        frame.set_opacity(0.8)
+        return frame
+
+    @staticmethod
+    def _build_keyword_chip(text: str) -> Gtk.Frame:
         label = Gtk.Label(label=text)
         label.add_css_class("caption")
-        label.set_margin_top(2)
-        label.set_margin_bottom(2)
-        label.set_margin_start(6)
-        label.set_margin_end(6)
+        label.set_margin_top(0)
+        label.set_margin_bottom(0)
+        label.set_margin_start(4)
+        label.set_margin_end(4)
         frame = Gtk.Frame()
         frame.set_child(label)
         return frame
