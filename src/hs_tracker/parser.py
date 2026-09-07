@@ -580,6 +580,22 @@ def _generated_into_hand_line(
     return f"{name} zur Hand hinzugefügt (Quelle unbekannt)"
 
 
+def _ordered_entity_ids(after: _EntitySnapshot, order: list[int] | None) -> list[int]:
+    """`after`'s own key order is entity creation order (an artifact of
+    `_snapshot_entities` iterating `game.entities`), not the order things
+    actually happened -- e.g. a damage-triggered draw's new hand card was
+    *created* long before the attack that triggers it. `order` (from
+    `_TurnBuilder`'s live touch-tracking) reflects real touch order for
+    whatever it saw; entities it never explicitly touched (or when no
+    tracking happened at all) fall back to the original creation order."""
+    if not order:
+        return list(after)
+    touched = [entity_id for entity_id in order if entity_id in after]
+    touched_set = set(touched)
+    remaining = [entity_id for entity_id in after if entity_id not in touched_set]
+    return touched + remaining
+
+
 def _diff_effects(
     game: Game,
     namer: _InstanceNamer,
@@ -587,11 +603,13 @@ def _diff_effects(
     before: _EntitySnapshot,
     after: _EntitySnapshot,
     exclude: frozenset[int] = frozenset(),
+    order: list[int] | None = None,
 ) -> list[str]:
     lines = []
-    for entity_id, current in after.items():
+    for entity_id in _ordered_entity_ids(after, order):
         if entity_id in exclude:
             continue
+        current = after[entity_id]
         entity = game.find_entity_by_id(entity_id)
         if entity is None:
             continue
@@ -697,6 +715,7 @@ def _build_attack_action(
     friendly_player: Player,
     before: _EntitySnapshot,
     after: _EntitySnapshot,
+    order: list[int] | None = None,
 ) -> Action:
     # The attacker ending up back in hand (rather than staying on the
     # board or dying) means the attack never actually connected -- most
@@ -708,7 +727,9 @@ def _build_attack_action(
     headline, folded = _attack_headline(
         block, game, namer, friendly_player, before, after, interrupted
     )
-    effects = _diff_effects(game, namer, friendly_player, before, after, exclude=folded)
+    effects = _diff_effects(
+        game, namer, friendly_player, before, after, exclude=folded, order=order
+    )
     if interrupted:
         effects.append("Angriff abgebrochen")
         defender_before = before.get(block.target, _NOT_TRACKED)
@@ -730,9 +751,10 @@ def _build_action(
     after: _EntitySnapshot,
     mana_before: int | None,
     mana_after: int | None,
+    order: list[int] | None = None,
 ) -> Action:
     if block.type == BlockType.ATTACK:
-        return _build_attack_action(block, game, namer, friendly_player, before, after)
+        return _build_attack_action(block, game, namer, friendly_player, before, after, order)
 
     entity = game.find_entity_by_id(block.entity)
     controller = entity.controller if entity is not None else None
@@ -752,7 +774,9 @@ def _build_action(
         # would just repeat the headline.
         exclude = frozenset({block.entity})
 
-    effects = _diff_effects(game, namer, friendly_player, before, after, exclude=exclude)
+    effects = _diff_effects(
+        game, namer, friendly_player, before, after, exclude=exclude, order=order
+    )
     return Action(headline=headline, effects=effects)
 
 
@@ -780,6 +804,15 @@ class _TurnBuilder:
         self._current: Turn | None = None
         self._active: Player | None = None
         self._pending_turn_number: int | None = None
+        # First-touch order of entity ids since the currently open top-level
+        # block started (see `on_entity_touched`) -- lets effect lines be
+        # shown in the order things actually happened, not incidentally in
+        # `_snapshot_entities`' creation-id order. Only accumulated while
+        # `_tracking` is on (i.e. between a tracked block's `before_block`
+        # and `after_block`), so an untracked block or the gap between
+        # blocks never pollutes the next tracked block's order.
+        self._touch_order: list[int] = []
+        self._tracking = False
         self.turns: list[Turn] = []
 
     def _players(self, game: Game) -> tuple[Player, Player]:
@@ -833,18 +866,32 @@ class _TurnBuilder:
             return None
         controller = self._block_controller(block, game)
         mana_before = _mana_state(controller).available if controller is not None else None
+        self._touch_order = []
+        self._tracking = True
         return _snapshot_entities(game), mana_before
+
+    def on_entity_touched(self, entity_id: int) -> None:
+        """Called live, as the replay processes each mutation packet inside
+        a tracked top-level block -- records the order entities were first
+        touched (TAG_CHANGE, or the entity's own creation/reveal), which is
+        the actual causal order, unlike `_snapshot_entities`' before/after
+        dict order."""
+        if self._tracking and entity_id not in self._touch_order:
+            self._touch_order.append(entity_id)
 
     def after_block(
         self, block: Any, game: Game, before: tuple[_EntitySnapshot, int | None]
     ) -> None:
         if self._current is None:
             return
+        self._tracking = False
+        order = self._touch_order
+        self._touch_order = []
         me, _opponent = self._players(game)
         before_entities, mana_before = before
         after_entities = _snapshot_entities(game)
         if _is_merge_only_block(block):
-            self._merge_effects_into_last_action(game, me, before_entities, after_entities)
+            self._merge_effects_into_last_action(game, me, before_entities, after_entities, order)
             return
         controller = self._block_controller(block, game)
         # `_mana_state` already clamps at 0 -- trust the game's own tags
@@ -852,18 +899,31 @@ class _TurnBuilder:
         # discounts included, is exactly what those tags already reflect).
         mana_after = _mana_state(controller).available if controller is not None else None
         action = _build_action(
-            block, game, self._namer, me, before_entities, after_entities, mana_before, mana_after
+            block,
+            game,
+            self._namer,
+            me,
+            before_entities,
+            after_entities,
+            mana_before,
+            mana_after,
+            order,
         )
         self._current.actions.append(action)
 
     def _merge_effects_into_last_action(
-        self, game: Game, friendly_player: Player, before: _EntitySnapshot, after: _EntitySnapshot
+        self,
+        game: Game,
+        friendly_player: Player,
+        before: _EntitySnapshot,
+        after: _EntitySnapshot,
+        order: list[int] | None = None,
     ) -> None:
         """A death's bookkeeping and its deathrattle's effect belong to
         whichever action caused them, not their own separate, actor-less
         entry."""
         assert self._current is not None
-        lines = _diff_effects(game, self._namer, friendly_player, before, after)
+        lines = _diff_effects(game, self._namer, friendly_player, before, after, order=order)
         if not lines:
             return
         if self._current.actions:
@@ -894,13 +954,37 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
         self._builder = builder
         self._depth = 0
 
+    def _touch(self, packet: Any) -> None:
+        self._builder.on_entity_touched(int(coerce_to_entity_id(packet.entity)))
+
     def handle_tag_change(self, packet: Any) -> Any:
         entity = super().handle_tag_change(packet)
+        self._touch(packet)
         if entity is self.game and self.game is not None:
             if packet.tag == GameTag.TURN:
                 self._builder.on_turn_number(packet.value, self.game)
             elif packet.tag == GameTag.STEP and packet.value == Step.MAIN_ACTION:
                 self._builder.on_turn_ready(self.game)
+        return entity
+
+    def handle_full_entity(self, packet: Any) -> Any:
+        entity = super().handle_full_entity(packet)
+        self._touch(packet)
+        return entity
+
+    def handle_show_entity(self, packet: Any) -> Any:
+        entity = super().handle_show_entity(packet)
+        self._touch(packet)
+        return entity
+
+    def handle_hide_entity(self, packet: Any) -> Any:
+        entity = super().handle_hide_entity(packet)
+        self._touch(packet)
+        return entity
+
+    def handle_change_entity(self, packet: Any) -> Any:
+        entity = super().handle_change_entity(packet)
+        self._touch(packet)
         return entity
 
     def handle_block(self, packet: Any) -> None:

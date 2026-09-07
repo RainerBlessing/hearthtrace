@@ -497,6 +497,13 @@ def test_parse_log_captures_effect_triggered_draw_mid_action() -> None:
     attack = next(a for a in turn7.actions if "Acolyte of Pain" in a.headline)
 
     assert "Gegner zieht eine Karte" in attack.effects
+    # The draw is a *consequence* of the damage (Acolyte of Pain's "whenever
+    # this minion takes damage, draw a card") -- effect lines must reflect
+    # the order things actually happened, not incidentally the order
+    # entities were first created.
+    damage_index = next(i for i, e in enumerate(attack.effects) if e.startswith("Acolyte of Pain"))
+    draw_index = attack.effects.index("Gegner zieht eine Karte")
+    assert damage_index < draw_index
 
 
 def test_parse_log_board_snapshot_includes_taunt_keyword() -> None:
