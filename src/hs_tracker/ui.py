@@ -23,6 +23,17 @@ from hs_tracker.parser import NoGameFoundError, ParsedGame, parse_log  # noqa: E
 # trigger an export yet.
 _FINISHED_RESULTS = {"WON", "LOST", "TIED", "CONCEDED"}
 
+# Dedicated app-state location for the export dedup marker (see
+# `_last_export_marker_path`) -- deliberately *not* inside `export_dir`,
+# which is a user-facing folder whose only documented purpose is holding
+# human-readable match exports. A user archiving or clearing that folder
+# (a reasonable thing to do with "my exports") must not silently resurrect
+# the re-export-on-restart bug this marker exists to prevent. Hardcoded
+# rather than reading `$XDG_STATE_HOME`, matching `app.py`'s equally
+# hardcoded `CONFIG_PATH` -- no other part of this project reads XDG env
+# vars, so doing it only here would be inconsistent for no real benefit.
+_STATE_DIR = Path.home() / ".local" / "state" / "hs-tracker"
+
 
 class TrackerWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application, config: Config) -> None:
@@ -88,9 +99,24 @@ class TrackerWindow(Adw.ApplicationWindow):
             self._stack.set_visible_child_name("tracker")
 
     def _refresh_history_list(self) -> None:
+        """Rebuild the Verlauf list from every exported match on disk.
+
+        Wrapped in a broad `except Exception`, unlike a plain read: this
+        runs from a GTK signal handler (the toggle button), not from
+        `_poll`'s own already-guarded call site -- an uncaught exception
+        here (e.g. a export-dir file that's unreadable, non-UTF-8, or gets
+        deleted mid-scan) would otherwise propagate straight out of the
+        signal handler and could leave the toggle unresponsive for the
+        rest of the session, with no visible error.
+        """
         while (row := self._history_list.get_row_at_index(0)) is not None:
             self._history_list.remove(row)
-        entries = load_match_history(self._config.export_dir)
+        try:
+            entries = load_match_history(self._config.export_dir)
+        except Exception as exc:  # noqa: BLE001 - must never break the toggle
+            print(f"hs-tracker: error while loading match history: {exc}", file=sys.stderr)
+            self._history_list.append(Gtk.Label(label="Fehler beim Laden des Verlaufs", xalign=0))
+            return
         if not entries:
             self._history_list.append(Gtk.Label(label="Noch keine Partien gespeichert", xalign=0))
             return
@@ -150,18 +176,21 @@ class TrackerWindow(Adw.ApplicationWindow):
             self._status_label.set_label("Warte auf Hearthstone …")
             return True
 
-        # Only remember this mtime as "handled" once parsing actually
-        # succeeded. A transient failure (e.g. hslog choking on a torn
-        # read while Hearthstone is mid-write) is reported by `_poll`'s
-        # broad `except Exception` -- but if this method had already
-        # updated `_last_log_mtime` before that, the very next tick's
-        # early-return above would skip retrying entirely until the file
-        # changes again, potentially getting stuck on a stale error and
-        # missing the match's true final state.
+        # Only remember this mtime as "handled" once *everything* this tick
+        # does with `game` has actually succeeded -- parsing, refreshing
+        # the deck list, and exporting. A transient failure anywhere in
+        # that chain (e.g. hslog choking on a torn read, or `_maybe_export`
+        # failing to write to a suddenly-unwritable export dir) is reported
+        # by `_poll`'s broad `except Exception`, but if this method had
+        # already updated `_last_log_mtime` before that, the very next
+        # tick's early-return above would skip retrying entirely until the
+        # file changes again -- for an already-finished match sitting in
+        # the newest log file, that can mean never, silently dropping the
+        # export for good.
+        self._refresh_deck_list(game)
+        self._maybe_export(game, log_path)
         self._last_log_path = log_path
         self._last_log_mtime = mtime
-        self._refresh_deck_list(game)
-        self._maybe_export(game)
         return True
 
     def _refresh_deck_list(self, game: ParsedGame) -> None:
@@ -180,7 +209,7 @@ class TrackerWindow(Adw.ApplicationWindow):
             card_name = card.name if card else card_id
             self._deck_list.append(Gtk.Label(label=card_name, xalign=0))
 
-    def _maybe_export(self, game: ParsedGame) -> None:
+    def _maybe_export(self, game: ParsedGame, log_path: Path) -> None:
         """Export a Markdown summary once per finished match.
 
         A match is "finished" only once its result is one of the terminal
@@ -198,29 +227,49 @@ class TrackerWindow(Adw.ApplicationWindow):
         the whole file every tick, an already-finished match would
         otherwise also be re-exported on every subsequent poll while the
         same log file is still the newest one on disk.
+
+        `log_path` is taken as a parameter (the same value `_poll_once`
+        just computed), not read back from `self._last_log_path` --
+        `_poll_once` now only commits that once this whole call has
+        already returned, so reading it here would still see the
+        *previous* tick's value (or `None` on the very first tick),
+        producing a wrong key that can never match a future genuine repeat
+        and silently defeats the dedup entirely.
         """
         if game.result not in _FINISHED_RESULTS:
             return
-        export_key = f"{self._last_log_path}:{game.game_index}"
+        export_key = f"{log_path}:{game.game_index}"
         if export_key == self._last_exported_key:
             return
         export_match_summary(game, export_dir=self._config.export_dir)
-        # Only recorded (in memory and on disk) once the export actually
-        # succeeded -- same reasoning as `_poll_once`'s mtime handling: a
-        # failed export (e.g. a full disk) must not be silently treated as
-        # "already done", or it would never be retried.
-        self._last_exported_key = export_key
+        # Marker saved to disk *before* the in-memory key is updated: if
+        # `_save_last_exported_key` itself throws (e.g. the state dir just
+        # became unwritable), the in-memory key must stay unset too, or a
+        # later restart would read back the still-stale on-disk marker and
+        # re-export the same match again -- the exact bug this exists to
+        # prevent. Same reasoning as `_poll_once`'s mtime handling more
+        # generally: nothing is marked "already done" until the write that
+        # makes it durable has actually succeeded.
         self._save_last_exported_key(export_key)
+        self._last_exported_key = export_key
         if self._stack.get_visible_child_name() == "history":
             self._refresh_history_list()
 
-    def _last_export_marker_path(self) -> Path:
-        return self._config.export_dir / ".last_export"
+    @staticmethod
+    def _last_export_marker_path() -> Path:
+        return _STATE_DIR / "last_export"
 
     def _load_last_exported_key(self) -> str | None:
+        # Any read failure (missing file, no permission, a directory
+        # somehow sitting at that path, ...) is treated the same as "no
+        # marker known" -- this is a best-effort dedup hint, not something
+        # that should be able to crash startup. `TrackerWindow.__init__`
+        # has no surrounding try/except (unlike the ConfigError path in
+        # app.py), so an uncaught exception here would take the whole app
+        # down before a window ever appears.
         try:
             return self._last_export_marker_path().read_text().strip() or None
-        except FileNotFoundError:
+        except OSError:
             return None
 
     def _save_last_exported_key(self, export_key: str) -> None:

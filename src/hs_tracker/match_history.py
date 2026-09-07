@@ -73,7 +73,16 @@ def _parse_export(path: Path) -> MatchHistoryEntry | None:
 def load_match_history(export_dir: Path) -> list[MatchHistoryEntry]:
     """Every previously exported match summary in `export_dir`, newest
     first. Returns an empty list if the directory doesn't exist yet (e.g.
-    no match has ever been exported)."""
+    no match has ever been exported).
+
+    Accepted MVP simplification (same trade-off `ui.py`'s `_poll_once`
+    already makes for `parse_log`): re-reads and re-parses every export on
+    every call rather than caching, which grows linearly with total match
+    count instead of being O(1) for "one more match got added". Not
+    redesigned now -- at personal-tracker scale (one file per match, each
+    a few hundred KB at most) this is well under human-perceptible latency
+    even at a few hundred matches; revisit only if that stops being true.
+    """
     if not export_dir.exists():
         return []
     entries = [

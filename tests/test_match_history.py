@@ -1,12 +1,42 @@
 from datetime import datetime
 from pathlib import Path
 
+from hs_tracker.markdown_export import export_match_summary
 from hs_tracker.match_history import (
     MatchHistoryEntry,
     _display_class,
     format_history_row,
     load_match_history,
 )
+from hs_tracker.parser import (
+    BoardState,
+    HandState,
+    LifeState,
+    ManaState,
+    ParsedGame,
+    Turn,
+    TurnSnapshot,
+)
+
+
+def _minimal_snapshot() -> TurnSnapshot:
+    return TurnSnapshot(
+        mana=ManaState(available=0, maximum=0, locked=0, overload_pending=0),
+        life=LifeState(own_health=30, own_armor=0, opponent_health=30, opponent_armor=0),
+        hand=HandState(own_cards=[], opponent_count=0),
+        board=BoardState(own=[], opponent=[]),
+    )
+
+
+def _minimal_turn(number: int) -> Turn:
+    return Turn(
+        number=number,
+        player_name="Du",
+        opening_draws=[],
+        start=_minimal_snapshot(),
+        actions=[],
+        end=_minimal_snapshot(),
+    )
 
 
 def _write_export(export_dir: Path, filename: str, own_class: str, opponent_class: str,
@@ -28,6 +58,34 @@ def _write_export(export_dir: Path, filename: str, own_class: str, opponent_clas
 
 def test_load_match_history_parses_filename_and_content(tmp_path: Path) -> None:
     _write_export(tmp_path, "2026-09-07_13-32-33_WON.md", "SHAMAN", "DEATHKNIGHT", [1, 2, 22])
+
+    entries = load_match_history(tmp_path)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.when == datetime(2026, 9, 7, 13, 32, 33)
+    assert entry.result_label == "Sieg"
+    assert entry.own_class == "Shaman"
+    assert entry.opponent_class == "Death Knight"
+    assert entry.turn_count == 22
+
+
+def test_load_match_history_parses_real_export_match_summary_output(tmp_path: Path) -> None:
+    # Round-trips through the actual writer (export_match_summary), not a
+    # hand-written approximation of its format -- catches drift if
+    # markdown_export.py's wording/heading format ever changes without the
+    # regexes in this module being updated to match (the other tests here
+    # all build synthetic export text by hand, which wouldn't notice that).
+    game = ParsedGame(
+        own_class="SHAMAN",
+        opponent_class="DEATHKNIGHT",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[_minimal_turn(n) for n in range(1, 23)],
+    )
+    export_match_summary(game, export_dir=tmp_path, when=datetime(2026, 9, 7, 13, 32, 33))
 
     entries = load_match_history(tmp_path)
 
