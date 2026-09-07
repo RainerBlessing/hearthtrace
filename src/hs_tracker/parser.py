@@ -233,7 +233,12 @@ class ParsedGame:
 
 
 def _class_name(player: Player, card_db: Any) -> str:
-    hero = player.hero
+    # `player.starting_hero` (not `.hero`, which is whatever the *current*
+    # hero entity is) -- some effects (Lord Jaraxxus, Majordomo Executus)
+    # replace a player's hero mid-match, but `own_class`/`opponent_class`
+    # describe the class picked at deck-select for the whole export, and
+    # must not flip to a later transform's class.
+    hero = player.starting_hero
     if hero is None or not hero.card_id:
         return "UNKNOWN"
     return str(card_db[hero.card_id].card_class.name)

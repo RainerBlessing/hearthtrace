@@ -17,6 +17,7 @@ from hs_tracker.parser import (
     Turn,
     TurnSnapshot,
     _build_attack_action,
+    _class_name,
     _deck_status,
     _diff_effects,
     _extract_discoveries,
@@ -252,6 +253,30 @@ def test_diff_effects_names_a_transform_by_pre_and_post_identity() -> None:
     lines = _diff_effects(game, namer, _friendly, before, after)
 
     assert lines == ["Void Terror #1 transformiert zu Frog #1 (1/1, kann angreifen)"]
+
+
+def test_class_name_uses_the_starting_hero_not_a_mid_match_transform() -> None:
+    # Some effects (Lord Jaraxxus, Majordomo Executus) replace a player's
+    # hero mid-match -- `own_class`/`opponent_class` describe the class
+    # picked at deck-select for the *whole* export, so they must stay that,
+    # not flip to whatever the hero became later in the match.
+    game, friendly, _opponent = _make_game_with_players()
+    original_hero = _register_card(
+        game, entity_id=10, card_id="HERO_01", controller=friendly, zone=Zone.PLAY
+    )
+    original_hero.tag_change(GameTag.CARDTYPE, CardType.HERO)
+    friendly.initial_hero_entity_id = original_hero.id
+    friendly.tags[GameTag.HERO_ENTITY] = original_hero.id
+
+    transformed_hero = _register_card(
+        game, entity_id=11, card_id="EX1_323h", controller=friendly, zone=Zone.PLAY
+    )
+    transformed_hero.tag_change(GameTag.CARDTYPE, CardType.HERO)
+    friendly.tags[GameTag.HERO_ENTITY] = transformed_hero.id  # mid-match swap
+
+    card_db, _ = load_cards()
+
+    assert _class_name(friendly, card_db) == "WARRIOR"  # HERO_01 = Garrosh Hellscream
 
 
 def test_weapon_of_returns_none_when_no_weapon_equipped() -> None:
