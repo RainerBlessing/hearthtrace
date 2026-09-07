@@ -39,9 +39,17 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
         f"**Eigene Klasse:** {game.own_class} | **Gegner-Klasse:** {game.opponent_class}",
         f"**Deck:** {', '.join(deck_names)} ({len(deck_names)} Karten)",
         "",
-        # Known follow-up, deliberately out of scope for this pass: a
-        # "## Mulligan" section (kept/returned) needs separate tracking
-        # logic not yet implemented.
+    ]
+    if game.mulligan is not None:
+        kept_names = _card_names(game.mulligan.kept, card_db)
+        returned_names = _card_names(game.mulligan.returned, card_db)
+        lines += [
+            "## Mulligan",
+            f"- Behalten: {', '.join(kept_names)}",
+            f"- Zurückgelegt: {', '.join(returned_names)}",
+            "",
+        ]
+    lines += [
         "## Zugverlauf",
     ]
     for i, event in enumerate(game.turn_log, start=1):

@@ -10,7 +10,7 @@ from typing import Any
 
 from hearthstone.cardxml import load as load_cards
 from hearthstone.entities import Game, Player
-from hearthstone.enums import BlockType, GameTag, PlayState, Zone
+from hearthstone.enums import BlockType, ChoiceType, GameTag, PlayState, Zone
 from hearthstone.utils import get_original_card_id
 from hslog import LogParser
 from hslog import packets as hslog_packets
@@ -31,6 +31,15 @@ class PlayEvent:
     turn: int
     player_name: str
     card_name: str
+
+
+@dataclass
+class MulliganChoice:
+    # Card ids the friendly player kept in their opening hand, and card ids
+    # they sent back to the deck, both in the order Hearthstone reports
+    # them. Opponent mulligans are not tracked (their cards are hidden).
+    kept: list[str]
+    returned: list[str]
 
 
 @dataclass
@@ -80,6 +89,10 @@ class ParsedGame:
     # matches; this lets callers tell two different matches with the same
     # `result` apart for dedup purposes.
     game_index: int
+    # None when no mulligan Choices packet for the friendly player was
+    # found (e.g. an incomplete/truncated log) -- absence, not an empty
+    # mulligan, since every real match has one.
+    mulligan: MulliganChoice | None = None
 
 
 def _class_name(player: Player, card_db: Any) -> str:
@@ -165,6 +178,69 @@ def _extract_turn_log(
     return walker.events
 
 
+def _collect_choice_packets(packet_tree: Any) -> tuple[list[Any], list[Any]]:
+    """Recursively find every `Choices` and `ChosenEntities` packet in the
+    tree. Both are registered wherever the parser's "current block" happens
+    to be at the time (top level during mulligan), not necessarily nested
+    under a `Block`, so this walks the same way `_TurnLogWalker` does."""
+    choices: list[Any] = []
+    chosen: list[Any] = []
+
+    def visit(packet: Any) -> None:
+        if isinstance(packet, hslog_packets.Choices):
+            choices.append(packet)
+        elif isinstance(packet, hslog_packets.ChosenEntities):
+            chosen.append(packet)
+        for child in getattr(packet, "packets", []):
+            visit(child)
+
+    for packet in packet_tree:
+        visit(packet)
+    return choices, chosen
+
+
+def _entity_card_id(game: Game, entity_id: int) -> str | None:
+    entity = game.find_entity_by_id(entity_id)
+    if entity is None or not entity.initial_card_id:
+        return None
+    return get_original_card_id(entity.initial_card_id)
+
+
+def _is_friendly_mulligan_choice(choice: Any, game: Game, friendly_player: Player) -> bool:
+    if choice.type != ChoiceType.MULLIGAN:
+        return False
+    entity_id = int(coerce_to_entity_id(choice.entity))
+    return game.find_entity_by_id(entity_id) is friendly_player
+
+
+def _resolve_card_ids(game: Game, entity_ids: list[int]) -> list[str]:
+    return [cid for cid in (_entity_card_id(game, eid) for eid in entity_ids) if cid]
+
+
+def _extract_mulligan(
+    packet_tree: Any, game: Game, friendly_player: Player
+) -> MulliganChoice | None:
+    """Find the friendly player's mulligan: the `Choices` packet of type
+    MULLIGAN whose player is `friendly_player` gives the offered hand; the
+    `ChosenEntities` packet sharing its choice id gives the cards actually
+    sent back (Hearthstone's mulligan choice is "which cards to replace",
+    not "which to keep")."""
+    choices, chosen = _collect_choice_packets(packet_tree)
+    mulligan_choice = next(
+        (c for c in choices if _is_friendly_mulligan_choice(c, game, friendly_player)), None
+    )
+    if mulligan_choice is None:
+        return None
+
+    chosen_entities = next((c for c in chosen if c.id == mulligan_choice.id), None)
+    returned_ids = chosen_entities.choices if chosen_entities else []
+    kept_ids = [entity_id for entity_id in mulligan_choice.choices if entity_id not in returned_ids]
+
+    kept = _resolve_card_ids(game, kept_ids)
+    returned = _resolve_card_ids(game, returned_ids)
+    return MulliganChoice(kept=kept, returned=returned)
+
+
 def _deck_status(me: Player) -> tuple[list[str], list[str]]:
     """Returns (remaining_card_ids, not_in_deck_card_ids) for the friendly
     player's starting deck, based on each card's final zone at the end of
@@ -202,6 +278,7 @@ def parse_log(path: Path) -> ParsedGame:
     card_db, _ = load_cards()
     turn_log = _extract_turn_log(packet_tree, game, card_db, me)
     _remaining, not_in_deck = _deck_status(me)
+    mulligan = _extract_mulligan(packet_tree, game, me)
 
     return ParsedGame(
         own_class=_class_name(me, card_db),
@@ -211,4 +288,5 @@ def parse_log(path: Path) -> ParsedGame:
         turn_log=turn_log,
         drawn_card_ids=not_in_deck,
         game_index=len(parser.games),
+        mulligan=mulligan,
     )

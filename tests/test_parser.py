@@ -69,6 +69,17 @@ def test_parse_log_extracts_first_play_event() -> None:
     assert first.card_name == "Elven Archer"
 
 
+def test_parse_log_extracts_mulligan_choice() -> None:
+    # Real mulligan from the fixture (Friendly#1000, entity id 2): offered
+    # Skywall Sentinel/Lightning Bolt/Envoy of the End, sent back Skywall
+    # Sentinel (SendChoices m_chosenEntities=[15]), kept the other two.
+    game = parse_log(FIXTURE)
+
+    assert game.mulligan is not None
+    assert game.mulligan.kept == ["CORE_EX1_238", "CATA_722"]
+    assert game.mulligan.returned == ["CATA_565"]
+
+
 def test_parse_log_extracts_not_in_deck_card_ids() -> None:
     game = parse_log(FIXTURE)
 

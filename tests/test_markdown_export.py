@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from hs_tracker.markdown_export import export_match_summary, render_match_summary
-from hs_tracker.parser import ParsedGame, PlayEvent
+from hs_tracker.parser import MulliganChoice, ParsedGame, PlayEvent
 
 
 def test_render_match_summary_includes_result_and_turn_log() -> None:
@@ -80,6 +80,42 @@ def test_render_match_summary_includes_remaining_deck_section() -> None:
     # CS2_022 (Polymorph) was drawn -- only CS2_023 (Arcane Intellect) remains.
     assert "Polymorph" not in markdown.split("## Restdeck bei Spielende")[1]
     assert "Arcane Intellect" in markdown.split("## Restdeck bei Spielende")[1]
+
+
+def test_render_match_summary_includes_mulligan_section_with_card_names() -> None:
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        turn_log=[],
+        drawn_card_ids=[],
+        game_index=1,
+        mulligan=MulliganChoice(kept=["CS2_023"], returned=["CS2_022"]),
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "## Mulligan" in markdown
+    assert "- Behalten: Arcane Intellect" in markdown
+    assert "- Zurückgelegt: Polymorph" in markdown
+
+
+def test_render_match_summary_omits_mulligan_section_when_none() -> None:
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        turn_log=[],
+        drawn_card_ids=[],
+        game_index=1,
+        mulligan=None,
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "## Mulligan" not in markdown
 
 
 def test_export_match_summary_writes_a_file(tmp_path: Path) -> None:
