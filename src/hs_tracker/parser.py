@@ -252,27 +252,29 @@ def _minion_keywords(entity: Entity) -> list[str]:
     return keywords
 
 
-def _minion_state(entity: Entity, card_db: Any) -> MinionState:
+def _minion_state(entity: Entity, namer: "_InstanceNamer") -> MinionState:
     health = entity.tags.get(GameTag.HEALTH, 0) - entity.tags.get(GameTag.DAMAGE, 0)
     return MinionState(
-        name=_card_name(entity, card_db),
+        name=namer.minion_name(entity),
         attack=entity.tags.get(GameTag.ATK, 0),
         health=health,
         keywords=_minion_keywords(entity),
     )
 
 
-def _board_of(player: Player, card_db: Any) -> list[MinionState]:
+def _board_of(player: Player, namer: "_InstanceNamer") -> list[MinionState]:
     minions = [e for e in player.in_zone(Zone.PLAY) if e.type == CardType.MINION]
     minions.sort(key=lambda e: e.tags.get(GameTag.ZONE_POSITION, 0))
-    return [_minion_state(entity, card_db) for entity in minions]
+    return [_minion_state(entity, namer) for entity in minions]
 
 
-def _board_state(me: Player, opponent: Player, card_db: Any) -> BoardState:
-    return BoardState(own=_board_of(me, card_db), opponent=_board_of(opponent, card_db))
+def _board_state(me: Player, opponent: Player, namer: "_InstanceNamer") -> BoardState:
+    return BoardState(own=_board_of(me, namer), opponent=_board_of(opponent, namer))
 
 
-def _turn_snapshot(me: Player, opponent: Player, active: Player, card_db: Any) -> TurnSnapshot:
+def _turn_snapshot(
+    me: Player, opponent: Player, active: Player, card_db: Any, namer: "_InstanceNamer"
+) -> TurnSnapshot:
     # Life/hand/board are always shown from the friendly player's own point
     # of view (Du/Gegner); mana is shown for whoever's turn it is, since
     # that's the resource that turn's actions are actually spent from.
@@ -280,26 +282,27 @@ def _turn_snapshot(me: Player, opponent: Player, active: Player, card_db: Any) -
         mana=_mana_state(active),
         life=_life_state(me, opponent),
         hand=_hand_state(me, opponent, card_db),
-        board=_board_state(me, opponent, card_db),
+        board=_board_state(me, opponent, namer),
     )
 
 
 # --- Action log (before/after state diffing) -------------------------------
 
-# entity_id -> (zone, attack, effective_health, armor), for every entity
-# that carries a HEALTH tag (heroes and minions -- not spells/weapons/
-# enchantments), captured just before and just after a top-level block runs.
+# entity_id -> (zone, attack, effective_health, armor) for every real card
+# entity (not the Game/Player objects themselves), captured just before and
+# just after a top-level block runs. attack/health/armor default to 0 for
+# entities that don't carry those tags (spells, weapons, ...) -- harmless,
+# since a 0-vs-0 comparison never produces a spurious diff line.
 _EntitySnapshot = dict[int, tuple[Zone, int, int, int]]
+_NOT_TRACKED: tuple[Zone, int, int, int] = (Zone.INVALID, 0, 0, 0)
 
 
 def _snapshot_entities(game: Game) -> _EntitySnapshot:
     snapshot: _EntitySnapshot = {}
     for entity in game.entities:
-        if entity is game:
+        if entity is game or isinstance(entity, Player):
             continue
-        health = entity.tags.get(GameTag.HEALTH)
-        if health is None:
-            continue
+        health = entity.tags.get(GameTag.HEALTH, 0)
         damage = entity.tags.get(GameTag.DAMAGE, 0)
         attack = entity.tags.get(GameTag.ATK, 0)
         armor = entity.tags.get(GameTag.ARMOR, 0)
@@ -307,23 +310,60 @@ def _snapshot_entities(game: Game) -> _EntitySnapshot:
     return snapshot
 
 
-def _display_name(entity: Entity, card_db: Any, friendly_player: Player) -> str:
-    if entity.type == CardType.HERO:
-        return "Dein Held" if entity.controller is friendly_player else "Gegnerischer Held"
-    return _card_name(entity, card_db)
+class _InstanceNamer:
+    """Names entities for display, assigning each minion a stable, ever-
+    increasing `#N` suffix (per card name) the first time it's displayed,
+    so identical copies -- e.g. two "Soldier of Al'Akir" tokens -- can be
+    told apart across board snapshots and action lines referring to the
+    same physical entity. Numbers are assigned lazily and never reused,
+    for the lifetime of one `parse_log` call."""
+
+    def __init__(self, card_db: Any) -> None:
+        self._card_db = card_db
+        self._numbers: dict[int, int] = {}
+        self._next_number: dict[str, int] = {}
+
+    def minion_name(self, entity: Entity) -> str:
+        base = _card_name(entity, self._card_db)
+        number = self._numbers.get(entity.id)
+        if number is None:
+            number = self._next_number.get(base, 0) + 1
+            self._next_number[base] = number
+            self._numbers[entity.id] = number
+        return f"{base} #{number}"
+
+    def display_name(self, entity: Entity, friendly_player: Player) -> str:
+        if entity.type == CardType.HERO:
+            return "Dein Held" if entity.controller is friendly_player else "Gegnerischer Held"
+        if entity.type == CardType.MINION:
+            return self.minion_name(entity)
+        return _card_name(entity, self._card_db)
 
 
-def _entity_diff_lines(
+def _zone_transition_line(
+    entity_type: CardType, name: str, is_friendly_owner: bool, zone_before: Zone, zone_after: Zone
+) -> str | None:
+    if entity_type == CardType.MINION:
+        if zone_before == Zone.PLAY and zone_after == Zone.GRAVEYARD:
+            return f"{name} stirbt"
+        if zone_after == Zone.PLAY and zone_before != Zone.PLAY:
+            # A freshly-entered-play minion's stats are already visible in
+            # the board snapshot -- no need to also print a 0/0 -> atk/hp
+            # diff for it.
+            return f"{name} beschworen"
+    if zone_before == Zone.DECK and zone_after == Zone.HAND:
+        return f"{name} gezogen" if is_friendly_owner else "Gegner zieht eine Karte"
+    return None
+
+
+def _stat_diff_lines(
     is_hero: bool,
     name: str,
     previous: tuple[Zone, int, int, int],
     current: tuple[Zone, int, int, int],
 ) -> list[str]:
-    zone_before, attack_before, health_before, armor_before = previous
-    zone_after, attack_after, health_after, armor_after = current
-    if zone_before == Zone.PLAY and zone_after == Zone.GRAVEYARD:
-        return [f"{name} stirbt"]
-
+    _zone_before, attack_before, health_before, armor_before = previous
+    _zone_after, attack_after, health_after, armor_after = current
     lines = []
     if health_after != health_before or (not is_hero and attack_after != attack_before):
         if is_hero:
@@ -335,9 +375,27 @@ def _entity_diff_lines(
     return lines
 
 
+def _entity_diff_lines(
+    entity_type: CardType,
+    name: str,
+    is_friendly_owner: bool,
+    previous: tuple[Zone, int, int, int] | None,
+    current: tuple[Zone, int, int, int],
+) -> list[str]:
+    resolved_previous = previous or _NOT_TRACKED
+    transition = _zone_transition_line(
+        entity_type, name, is_friendly_owner, resolved_previous[0], current[0]
+    )
+    if transition is not None:
+        return [transition]
+    if previous is None:
+        return []
+    return _stat_diff_lines(entity_type == CardType.HERO, name, previous, current)
+
+
 def _diff_effects(
     game: Game,
-    card_db: Any,
+    namer: _InstanceNamer,
     friendly_player: Player,
     before: _EntitySnapshot,
     after: _EntitySnapshot,
@@ -350,13 +408,10 @@ def _diff_effects(
         entity = game.find_entity_by_id(entity_id)
         if entity is None:
             continue
-        name = _display_name(entity, card_db, friendly_player)
+        name = namer.display_name(entity, friendly_player)
         previous = before.get(entity_id)
-        if previous is None:
-            if current[0] == Zone.PLAY:
-                lines.append(f"{name} beschworen")
-            continue
-        lines += _entity_diff_lines(entity.type == CardType.HERO, name, previous, current)
+        is_friendly_owner = entity.controller is friendly_player
+        lines += _entity_diff_lines(entity.type, name, is_friendly_owner, previous, current)
     return lines
 
 
@@ -373,7 +428,7 @@ def _mana_headline_suffix(mana_before: int | None, mana_after: int | None) -> st
 
 
 def _attack_headline(
-    block: Any, game: Game, card_db: Any, friendly_player: Player, before: _EntitySnapshot
+    block: Any, game: Game, namer: _InstanceNamer, friendly_player: Player, before: _EntitySnapshot
 ) -> tuple[str, frozenset[int]]:
     """Returns (headline, entity ids already folded into the headline --
     excluded from the generic effect-line diff to avoid duplicating them)."""
@@ -383,12 +438,12 @@ def _attack_headline(
     if attacker is None or defender is None:
         return f"{player_label}: Angriff", frozenset()
 
-    attacker_name = _display_name(attacker, card_db, friendly_player)
-    defender_name = _display_name(defender, card_db, friendly_player)
-    attacker_attack = before.get(block.entity, (Zone.INVALID, 0, 0, 0))[1]
+    attacker_name = namer.display_name(attacker, friendly_player)
+    defender_name = namer.display_name(defender, friendly_player)
+    attacker_attack = before.get(block.entity, _NOT_TRACKED)[1]
 
     if defender.type == CardType.HERO:
-        health_before = before.get(block.target, (Zone.INVALID, 0, 0, 0))[2]
+        health_before = before.get(block.target, _NOT_TRACKED)[2]
         headline = (
             f"{player_label}: {attacker_name} ({attacker_attack} Angriff) → "
             f"{defender_name}: {health_before} → "
@@ -398,10 +453,19 @@ def _attack_headline(
     return f"{player_label}: {attacker_name} → {defender_name}", frozenset()
 
 
+def _target_suffix(block: Any, game: Game, namer: _InstanceNamer, friendly_player: Player) -> str:
+    if not block.target:
+        return ""
+    target = game.find_entity_by_id(block.target)
+    if target is None:
+        return ""
+    return f" → Ziel: {namer.display_name(target, friendly_player)}"
+
+
 def _build_action(
     block: Any,
     game: Game,
-    card_db: Any,
+    namer: _InstanceNamer,
     friendly_player: Player,
     before: _EntitySnapshot,
     after: _EntitySnapshot,
@@ -409,27 +473,34 @@ def _build_action(
     mana_after: int | None,
 ) -> Action:
     if block.type == BlockType.ATTACK:
-        headline, folded = _attack_headline(block, game, card_db, friendly_player, before)
+        headline, folded = _attack_headline(block, game, namer, friendly_player, before)
         if headline.endswith("→ "):
             # Hero-target attack: fold the life change straight into the
             # headline (per spec, no separate result line for this case).
-            health_after = after.get(block.target, (Zone.INVALID, 0, 0, 0))[2]
+            health_after = after.get(block.target, _NOT_TRACKED)[2]
             headline += str(health_after)
-        effects = _diff_effects(game, card_db, friendly_player, before, after, exclude=folded)
+        effects = _diff_effects(game, namer, friendly_player, before, after, exclude=folded)
         return Action(headline=headline, effects=effects)
 
     entity = game.find_entity_by_id(block.entity)
     controller = entity.controller if entity is not None else None
     player_label = _player_label(controller, friendly_player)
 
+    exclude: frozenset[int] = frozenset()
     if block.type == BlockType.FATIGUE:
         headline = f"{player_label}: Ermüdungsschaden"
     else:
-        name = _display_name(entity, card_db, friendly_player) if entity is not None else "?"
+        name = namer.display_name(entity, friendly_player) if entity is not None else "?"
         verb = _BLOCK_VERBS[block.type]
-        headline = f"{player_label}: {name} {verb}{_mana_headline_suffix(mana_before, mana_after)}"
+        target_suffix = _target_suffix(block, game, namer, friendly_player)
+        mana_suffix = _mana_headline_suffix(mana_before, mana_after)
+        headline = f"{player_label}: {name} {verb}{target_suffix}{mana_suffix}"
+        # The played card's own hand->play transition is already conveyed
+        # by "gespielt" -- showing a redundant "beschworen" line for it too
+        # would just repeat the headline.
+        exclude = frozenset({block.entity})
 
-    effects = _diff_effects(game, card_db, friendly_player, before, after)
+    effects = _diff_effects(game, namer, friendly_player, before, after, exclude=exclude)
     return Action(headline=headline, effects=effects)
 
 
@@ -450,6 +521,7 @@ class _TurnBuilder:
     def __init__(self, friendly_id: int | None, card_db: Any) -> None:
         self._friendly_id = friendly_id
         self._card_db = card_db
+        self._namer = _InstanceNamer(card_db)
         self._game: Game | None = None
         self._me: Player | None = None
         self._opponent: Player | None = None
@@ -474,7 +546,9 @@ class _TurnBuilder:
         self._game = game
         if self._current is not None and self._active is not None:
             me, opponent = self._players(game)
-            self._current.end = _turn_snapshot(me, opponent, self._active, self._card_db)
+            self._current.end = _turn_snapshot(
+                me, opponent, self._active, self._card_db, self._namer
+            )
             self.turns.append(self._current)
             self._current = None
         self._pending_turn_number = turn_number
@@ -494,9 +568,9 @@ class _TurnBuilder:
         self._current = Turn(
             number=turn_number,
             player_name=_player_label(active, me),
-            start=_turn_snapshot(me, opponent, active, self._card_db),
+            start=_turn_snapshot(me, opponent, active, self._card_db, self._namer),
             actions=[],
-            end=_turn_snapshot(me, opponent, active, self._card_db),
+            end=_turn_snapshot(me, opponent, active, self._card_db, self._namer),
         )
 
     def before_block(self, block: Any, game: Game) -> tuple[_EntitySnapshot, int | None] | None:
@@ -517,7 +591,7 @@ class _TurnBuilder:
         controller = self._block_controller(block, game)
         mana_after = _mana_state(controller).available if controller is not None else None
         action = _build_action(
-            block, game, self._card_db, me, before_entities, after_entities, mana_before, mana_after
+            block, game, self._namer, me, before_entities, after_entities, mana_before, mana_after
         )
         self._current.actions.append(action)
 
@@ -530,7 +604,7 @@ class _TurnBuilder:
         if self._current is None or self._active is None:
             return
         me, opponent = self._players(game)
-        self._current.end = _turn_snapshot(me, opponent, self._active, self._card_db)
+        self._current.end = _turn_snapshot(me, opponent, self._active, self._card_db, self._namer)
         self.turns.append(self._current)
         self._current = None
 

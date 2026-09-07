@@ -122,16 +122,19 @@ def test_parse_log_builds_one_turn_per_global_turn_number() -> None:
     assert game.turns[1].player_name == "Gegner"
 
 
-def test_parse_log_records_play_action_with_mana_and_summon_effect() -> None:
-    # The opponent's very first play: Elven Archer, a 1-mana 1/1 with a
-    # battlecry that deals 1 damage to a target -- here, the friendly hero.
+def test_parse_log_records_play_action_with_target_mana_and_battlecry_effect() -> None:
+    # The opponent's very first play: Elven Archer, a 1-mana 1/1 whose
+    # battlecry deals 1 damage to a target -- here, the friendly hero. The
+    # target must be named in the headline (not just visible as a stray
+    # hero-health diff line), and the played card's own "beschworen" is
+    # suppressed as redundant with "gespielt".
     game = parse_log(FIXTURE)
     turn2 = next(t for t in game.turns if t.number == 2)
 
-    play = next(a for a in turn2.actions if "Elven Archer gespielt" in a.headline)
+    play = next(a for a in turn2.actions if "Elven Archer #1 gespielt" in a.headline)
 
-    assert play.headline == "Gegner: Elven Archer gespielt (Mana: 1 → 0)"
-    assert play.effects == ["Elven Archer beschworen", "Dein Held: 30 → 29"]
+    assert play.headline == "Gegner: Elven Archer #1 gespielt → Ziel: Dein Held (Mana: 1 → 0)"
+    assert play.effects == ["Dein Held: 30 → 29"]
 
 
 def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
@@ -145,7 +148,7 @@ def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
         a for a in turn4.actions if "Elven Archer" in a.headline and "Angriff" in a.headline
     )
 
-    assert attack.headline == "Gegner: Elven Archer (1 Angriff) → Dein Held: 29 → 28"
+    assert attack.headline == "Gegner: Elven Archer #1 (1 Angriff) → Dein Held: 29 → 28"
     assert attack.effects == []
 
 
@@ -162,13 +165,42 @@ def test_parse_log_infers_draw_action_from_hand_delta() -> None:
     assert turn3.actions[0].headline == "Du: gezogen — Wailing Vapor"
 
 
-def test_parse_log_board_snapshot_includes_taunt_keyword() -> None:
-    # By turn 7's start, the friendly player's Skywall Sentinel (kept in
-    # the mulligan) is a 1/1 Taunt minion on the board.
+def test_parse_log_numbers_identical_minions_to_tell_them_apart() -> None:
+    # Turn 7's Ritual of Power buffs several existing "Soldier of Al'Akir"
+    # tokens and summons a new one, ending the turn with two of them alive
+    # at different stats -- they must be distinguishable, not collapsed
+    # into two identical-looking board entries.
     game = parse_log(FIXTURE)
     turn7 = next(t for t in game.turns if t.number == 7)
 
-    sentinel = next(m for m in turn7.start.board.own if m.name == "Skywall Sentinel")
+    names = [m.name for m in turn7.end.board.own]
+
+    assert "Soldier of Al'Akir #4" in names
+    assert "Soldier of Al'Akir #5" in names
+
+
+def test_parse_log_captures_effect_triggered_draw_mid_action() -> None:
+    # Turn 7: attacking the opponent's Acolyte of Pain ("whenever this
+    # minion takes damage, draw a card") makes the opponent draw as a side
+    # effect of the attack, not the turn's normal draw step -- it must show
+    # up as an effect line on that attack, not silently vanish.
+    game = parse_log(FIXTURE)
+    turn7 = next(t for t in game.turns if t.number == 7)
+
+    attack = next(a for a in turn7.actions if "Acolyte of Pain" in a.headline)
+
+    assert "Gegner zieht eine Karte" in attack.effects
+
+
+def test_parse_log_board_snapshot_includes_taunt_keyword() -> None:
+    # By turn 7's start, the friendly player's Skywall Sentinel (kept in
+    # the mulligan) is a 1/1 Taunt minion on the board, tagged "#1" -- a
+    # stable per-name instance number so identical copies can be told
+    # apart later in the match.
+    game = parse_log(FIXTURE)
+    turn7 = next(t for t in game.turns if t.number == 7)
+
+    sentinel = next(m for m in turn7.start.board.own if m.name == "Skywall Sentinel #1")
 
     assert sentinel.attack == 1
     assert sentinel.health == 1

@@ -17,6 +17,12 @@ _RESULT_LABELS = {
     "UNKNOWN": "Unbekannt",
 }
 
+# A real constructed-format deck always has exactly 30 cards. `starting_deck`
+# only contains cards actually seen (drawn, played, revealed) by the end of
+# the match, so it's frequently an incomplete subset -- the wording must say
+# so, rather than implying it's the true, complete deck/remaining-deck state.
+_FULL_DECK_SIZE = 30
+
 
 def _card_names(card_ids: list[str], card_db: Any) -> list[str]:
     names = []
@@ -92,12 +98,13 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
     deck_names = _card_names(game.starting_deck, card_db)
     remaining_names = _card_names(deck_state.remaining_deck(game), card_db)
 
+    deck_label = "Deck" if len(deck_names) >= _FULL_DECK_SIZE else "Bekannte Deck-Karten"
     lines = [
         f"# Hearthstone Match – {when.strftime('%d.%m.%Y %H:%M')}",
         "",
         f"**Ergebnis:** {_RESULT_LABELS.get(game.result, game.result)}",
         f"**Eigene Klasse:** {game.own_class} | **Gegner-Klasse:** {game.opponent_class}",
-        f"**Deck:** {', '.join(deck_names)} ({len(deck_names)} Karten)",
+        f"**{deck_label}:** {', '.join(deck_names)} ({len(deck_names)} Karten)",
         "",
     ]
     if game.mulligan is not None:
@@ -111,10 +118,18 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
         ]
     for turn in game.turns:
         lines += _render_turn(turn)
-    lines += [
-        "## Restdeck bei Spielende",
-        f"- Noch {len(remaining_names)} Karten im Deck: {', '.join(remaining_names)}",
-    ]
+    if len(deck_names) >= _FULL_DECK_SIZE:
+        lines += [
+            "## Restdeck bei Spielende",
+            f"- Noch {len(remaining_names)} Karten im Deck: {', '.join(remaining_names)}",
+        ]
+    else:
+        lines += [
+            "## Bekannte Karten im Restdeck",
+            "(Das Deck wird nicht im Voraus geladen -- nur bereits gesehene Karten sind bekannt,"
+            " die tatsächliche Kartenzahl im Deck kann höher sein.)",
+            f"- {len(remaining_names)} bekannte Karten: {', '.join(remaining_names)}",
+        ]
     return "\n".join(lines) + "\n"
 
 
