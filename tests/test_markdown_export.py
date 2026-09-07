@@ -1,47 +1,95 @@
 from pathlib import Path
 
 from hs_tracker.markdown_export import export_match_summary, render_match_summary
-from hs_tracker.parser import MulliganChoice, ParsedGame, PlayEvent
+from hs_tracker.parser import (
+    Action,
+    BoardState,
+    HandState,
+    LifeState,
+    ManaState,
+    MinionState,
+    MulliganChoice,
+    ParsedGame,
+    Turn,
+    TurnSnapshot,
+)
 
 
-def test_render_match_summary_includes_result_and_turn_log() -> None:
+def _snapshot(
+    *,
+    mana: ManaState | None = None,
+    life: LifeState | None = None,
+    hand: HandState | None = None,
+    board: BoardState | None = None,
+) -> TurnSnapshot:
+    return TurnSnapshot(
+        mana=mana or ManaState(available=1, maximum=1, overload_pending=0),
+        life=life or LifeState(own_health=30, own_armor=0, opponent_health=30, opponent_armor=0),
+        hand=hand or HandState(own_cards=[], opponent_count=0),
+        board=board or BoardState(own=[], opponent=[]),
+    )
+
+
+def _turn(
+    *,
+    number: int = 1,
+    player_name: str = "Du",
+    start: TurnSnapshot | None = None,
+    actions: list[Action] | None = None,
+    end: TurnSnapshot | None = None,
+) -> Turn:
+    return Turn(
+        number=number,
+        player_name=player_name,
+        start=start or _snapshot(),
+        actions=actions or [],
+        end=end or _snapshot(),
+    )
+
+
+def test_render_match_summary_includes_result_and_turn_heading() -> None:
     game = ParsedGame(
         own_class="MAGE",
         opponent_class="WARRIOR",
         starting_deck=["CS2_022"] * 30,
         result="WON",
-        turn_log=[PlayEvent(turn=1, player_name="Du", card_name="Arcane Missiles")],
         drawn_card_ids=[],
         game_index=1,
+        turns=[_turn(number=1, player_name="Du")],
     )
 
     markdown = render_match_summary(game)
 
     assert "**Ergebnis:** Sieg" in markdown
     assert "MAGE" in markdown
-    assert "Arcane Missiles" in markdown
+    assert "## Zug 1 – Du" in markdown
 
 
 def test_render_match_summary_uses_du_and_gegner_not_raw_account_names() -> None:
-    # The turn log must never leak the user's real Battle.net account name
-    # (or the opponent's) into text meant to be pasted into an AI chat.
+    # Action headlines must never leak the user's real Battle.net account
+    # name (or the opponent's) into text meant to be pasted into an AI chat.
     game = ParsedGame(
         own_class="MAGE",
         opponent_class="WARRIOR",
         starting_deck=[],
         result="WON",
-        turn_log=[
-            PlayEvent(turn=1, player_name="Du", card_name="Arcane Missiles"),
-            PlayEvent(turn=2, player_name="Gegner", card_name="Fiery War Axe"),
-        ],
         drawn_card_ids=[],
         game_index=1,
+        turns=[
+            _turn(
+                number=1,
+                actions=[
+                    Action(headline="Du: Arcane Missiles gespielt (Mana: 1 → 0)"),
+                    Action(headline="Gegner: Fiery War Axe gespielt (Mana: 2 → 0)"),
+                ],
+            )
+        ],
     )
 
     markdown = render_match_summary(game)
 
-    assert "**Du:**" in markdown
-    assert "**Gegner:**" in markdown
+    assert "Du: Arcane Missiles gespielt" in markdown
+    assert "Gegner: Fiery War Axe gespielt" in markdown
 
 
 def test_render_match_summary_includes_full_deck_section_with_card_names() -> None:
@@ -50,7 +98,6 @@ def test_render_match_summary_includes_full_deck_section_with_card_names() -> No
         opponent_class="WARRIOR",
         starting_deck=["CS2_022", "CS2_023"],
         result="WON",
-        turn_log=[],
         drawn_card_ids=[],
         game_index=1,
     )
@@ -68,7 +115,6 @@ def test_render_match_summary_includes_remaining_deck_section() -> None:
         opponent_class="WARRIOR",
         starting_deck=["CS2_022", "CS2_023"],
         result="WON",
-        turn_log=[],
         drawn_card_ids=["CS2_022"],
         game_index=1,
     )
@@ -88,7 +134,6 @@ def test_render_match_summary_includes_mulligan_section_with_card_names() -> Non
         opponent_class="WARRIOR",
         starting_deck=[],
         result="WON",
-        turn_log=[],
         drawn_card_ids=[],
         game_index=1,
         mulligan=MulliganChoice(kept=["CS2_023"], returned=["CS2_022"]),
@@ -107,7 +152,6 @@ def test_render_match_summary_omits_mulligan_section_when_none() -> None:
         opponent_class="WARRIOR",
         starting_deck=[],
         result="WON",
-        turn_log=[],
         drawn_card_ids=[],
         game_index=1,
         mulligan=None,
@@ -118,10 +162,80 @@ def test_render_match_summary_omits_mulligan_section_when_none() -> None:
     assert "## Mulligan" not in markdown
 
 
+def test_render_match_summary_includes_mana_life_hand_and_board_snapshot() -> None:
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[
+            _turn(
+                number=7,
+                start=_snapshot(
+                    mana=ManaState(available=4, maximum=5, overload_pending=1),
+                    life=LifeState(
+                        own_health=27, own_armor=2, opponent_health=24, opponent_armor=0
+                    ),
+                    hand=HandState(own_cards=["Hex", "Lightning Bolt"], opponent_count=5),
+                    board=BoardState(
+                        own=[
+                            MinionState(
+                                name="Skywall Sentinel", attack=0, health=2, keywords=["Spott"]
+                            )
+                        ],
+                        opponent=[],
+                    ),
+                ),
+            )
+        ],
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Mana: 4/5 | Überladen: 1" in markdown
+    assert "Heldenleben: Du 27 | Gegner 24" in markdown
+    assert "Rüstung: Du 2 | Gegner 0" in markdown
+    assert "- Hex" in markdown
+    assert "Hand (Gegner): 5 Karten" in markdown
+    assert "- Skywall Sentinel (0/2, Spott)" in markdown
+
+
+def test_render_match_summary_includes_actions_with_indented_effects() -> None:
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[
+            _turn(
+                actions=[
+                    Action(
+                        headline="Du: Ritual of Power gespielt (Mana: 4 → 2)",
+                        effects=["Breezling beschworen"],
+                    )
+                ]
+            )
+        ],
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "1. Du: Ritual of Power gespielt (Mana: 4 → 2)" in markdown
+    assert "   → Breezling beschworen" in markdown
+
+
 def test_export_match_summary_writes_a_file(tmp_path: Path) -> None:
     game = ParsedGame(
-        own_class="MAGE", opponent_class="WARRIOR", starting_deck=[],
-        result="WON", turn_log=[], drawn_card_ids=[], game_index=1,
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
     )
 
     written = export_match_summary(game, export_dir=tmp_path)

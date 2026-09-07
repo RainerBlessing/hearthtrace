@@ -59,8 +59,13 @@ export_dir = "~/HearthstoneAnalysis"
    ```
    z. B. `2026-09-07_20-15-30_WON.md`. Diese Datei kann direkt in einen
    Claude-Chat eingefügt werden, um die Partie analysieren zu lassen.
-   Enthalten sind Ergebnis, Klassen, Deck, Mulligan (behalten/zurückgelegt),
-   Zugverlauf und Restdeck bei Spielende.
+   Enthalten sind Ergebnis, Klassen, Deck, Mulligan (behalten/zurückgelegt)
+   und Restdeck bei Spielende, sowie pro Zug ein vollständiger Snapshot
+   (Start → Aktionen → Ende): Mana (verfügbar/Maximum/Überladen),
+   Heldenleben & Rüstung, eigene Hand (Gegner nur als Kartenanzahl —
+   verdeckte Information wird nie aufgedeckt), Board beider Seiten
+   (Angriff/Leben, relevante Zustände wie Spott/Göttlicher Schild) sowie
+   gerichtete Angriffe mit Ergebnis.
 
 **Hinweis:** Der Tracker muss während des Matches laufen, da live aus dem
 Log gelesen wird — ein nachträglicher Export aus einem alten `Power.log`

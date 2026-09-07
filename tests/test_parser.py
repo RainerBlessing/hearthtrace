@@ -52,21 +52,70 @@ def test_parse_log_extracts_game_index() -> None:
     assert game.game_index == 1
 
 
-def test_parse_log_extracts_first_play_event() -> None:
-    game = parse_log(FIXTURE)
-
-    assert len(game.turn_log) > 0
-    first = game.turn_log[0]
+def test_parse_log_builds_one_turn_per_global_turn_number() -> None:
     # Real Hearthstone turn numbering counts each player's turn separately
     # (turn 1 = the first player's opening turn, turn 2 = the second
-    # player's opening turn, ...). Nobody played anything on turn 1 in
-    # this match; the opponent's Elven Archer on their opening turn is
-    # the very first PLAY block in the fixture. `player_name` is "Du"/
-    # "Gegner" (never the raw Battle.net account name) so match summaries
-    # can be pasted without leaking the user's real BattleTag.
-    assert first.turn == 2
-    assert first.player_name == "Gegner"
-    assert first.card_name == "Elven Archer"
+    # player's opening turn, ...); `player_name` is "Du"/"Gegner" (never
+    # the raw Battle.net account name) so match summaries can be pasted
+    # without leaking the user's real BattleTag.
+    game = parse_log(FIXTURE)
+
+    assert [t.number for t in game.turns] == list(range(1, 16))
+    assert game.turns[0].player_name == "Du"
+    assert game.turns[1].player_name == "Gegner"
+
+
+def test_parse_log_records_play_action_with_mana_and_summon_effect() -> None:
+    # The opponent's very first play: Elven Archer, a 1-mana 1/1 with a
+    # battlecry that deals 1 damage to a target -- here, the friendly hero.
+    game = parse_log(FIXTURE)
+    turn2 = next(t for t in game.turns if t.number == 2)
+
+    play = next(a for a in turn2.actions if "Elven Archer gespielt" in a.headline)
+
+    assert play.headline == "Gegner: Elven Archer gespielt (Mana: 1 → 0)"
+    assert play.effects == ["Elven Archer beschworen", "Dein Held: 30 → 29"]
+
+
+def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
+    # Turn 4: the opponent's Elven Archer attacks the friendly hero. A
+    # hero-target attack is folded into a single line (no separate result
+    # bullet), per the format the user asked for.
+    game = parse_log(FIXTURE)
+    turn4 = next(t for t in game.turns if t.number == 4)
+
+    attack = next(
+        a for a in turn4.actions if "Elven Archer" in a.headline and "Angriff" in a.headline
+    )
+
+    assert attack.headline == "Gegner: Elven Archer (1 Angriff) → Dein Held: 29 → 28"
+    assert attack.effects == []
+
+
+def test_parse_log_infers_draw_action_from_hand_delta() -> None:
+    # Nothing else happens between the end of one turn and the ready state
+    # of the next besides that turn's own draw -- the friendly player's
+    # draw is shown by name (always known); the opponent's only as a
+    # generic draw notice (their identity is hidden information).
+    game = parse_log(FIXTURE)
+    turn2 = next(t for t in game.turns if t.number == 2)
+    turn3 = next(t for t in game.turns if t.number == 3)
+
+    assert turn2.actions[0].headline == "Gegner: zieht eine Karte"
+    assert turn3.actions[0].headline == "Du: gezogen — Wailing Vapor"
+
+
+def test_parse_log_board_snapshot_includes_taunt_keyword() -> None:
+    # By turn 7's start, the friendly player's Skywall Sentinel (kept in
+    # the mulligan) is a 1/1 Taunt minion on the board.
+    game = parse_log(FIXTURE)
+    turn7 = next(t for t in game.turns if t.number == 7)
+
+    sentinel = next(m for m in turn7.start.board.own if m.name == "Skywall Sentinel")
+
+    assert sentinel.attack == 1
+    assert sentinel.health == 1
+    assert "Spott" in sentinel.keywords
 
 
 def test_parse_log_extracts_mulligan_choice() -> None:
