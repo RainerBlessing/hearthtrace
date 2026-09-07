@@ -64,8 +64,9 @@ export_dir = "~/HearthstoneAnalysis"
    (Start → Aktionen → Ende): Mana (verfügbar/Maximum/Überladen),
    Heldenleben & Rüstung, eigene Hand (Gegner nur als Kartenanzahl —
    verdeckte Information wird nie aufgedeckt), Board beider Seiten
-   (Angriff/Leben, relevante Zustände wie Spott/Göttlicher Schild) sowie
-   gerichtete Angriffe mit Ergebnis.
+   (Angriff/Leben, relevante Zustände wie Spott/Göttlicher Schild), sowie
+   gerichtete Angriffe mit Ergebnis und eigene Discover-Auswahlen
+   (angebotene Karten + Wahl — beim Gegner naturgemäß nicht sichtbar).
 
 **Hinweis:** Der Tracker muss während des Matches laufen, da live aus dem
 Log gelesen wird — ein nachträglicher Export aus einem alten `Power.log`

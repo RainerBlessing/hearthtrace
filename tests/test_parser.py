@@ -1,10 +1,18 @@
 from pathlib import Path
 
 import pytest
+from hearthstone.cardxml import load as load_cards
 from hearthstone.entities import Card, Game, Player
-from hearthstone.enums import GameTag, Zone
+from hearthstone.enums import ChoiceType, GameTag, Zone
+from hslog import packets as hslog_packets
 
-from hs_tracker.parser import NoGameFoundError, _deck_status, parse_log
+from hs_tracker.parser import (
+    Action,
+    NoGameFoundError,
+    _deck_status,
+    _extract_discoveries,
+    parse_log,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_match.power.log"
 
@@ -27,6 +35,55 @@ def _register_card(
     card.tag_change(GameTag.CONTROLLER, controller.player_id)
     game.register_entity(card)
     return card
+
+
+def test_extract_discoveries_finds_friendly_general_choice() -> None:
+    # Built from real hslog/hearthstone packet objects (not fabricated log
+    # text) -- same pattern as the `_deck_status` tests below -- since no
+    # Discover happens to occur in the real fixture match.
+    game, friendly, _opponent = _make_game_with_players()
+    _register_card(game, entity_id=10, card_id="CS2_022", controller=friendly)  # Polymorph
+    _register_card(game, entity_id=11, card_id="CS2_023", controller=friendly)  # Arcane Intellect
+
+    turn_tag = hslog_packets.TagChange(ts=None, entity=game.id, tag=GameTag.TURN, value=5)
+    choice = hslog_packets.Choices(
+        ts=None, entity=friendly.id, id=1, tasklist=None, type=ChoiceType.GENERAL, min=1, max=1
+    )
+    choice.choices = [10, 11]
+    chosen_entities = hslog_packets.ChosenEntities(ts=None, entity=friendly.id, id=1)
+    chosen_entities.choices = [11]
+    packet_tree = [turn_tag, choice, chosen_entities]
+
+    card_db, _ = load_cards()
+    picks = _extract_discoveries(packet_tree, game, card_db, friendly)
+
+    assert picks == [
+        (
+            5,
+            Action(
+                headline="Du: Discover",
+                effects=["Angeboten: Polymorph, Arcane Intellect", "Gewählt: Arcane Intellect"],
+            ),
+        )
+    ]
+
+
+def test_extract_discoveries_ignores_opponent_choice() -> None:
+    game, friendly, opponent = _make_game_with_players()
+    _register_card(game, entity_id=10, card_id="CS2_022", controller=opponent)
+
+    choice = hslog_packets.Choices(
+        ts=None, entity=opponent.id, id=1, tasklist=None, type=ChoiceType.GENERAL, min=1, max=1
+    )
+    choice.choices = [10]
+    chosen_entities = hslog_packets.ChosenEntities(ts=None, entity=opponent.id, id=1)
+    chosen_entities.choices = [10]
+    packet_tree = [choice, chosen_entities]
+
+    card_db, _ = load_cards()
+    picks = _extract_discoveries(packet_tree, game, card_db, friendly)
+
+    assert picks == []
 
 
 def test_parse_log_extracts_own_class_and_deck_size() -> None:

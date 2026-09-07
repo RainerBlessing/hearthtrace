@@ -138,11 +138,13 @@ class ParsedGame:
       (one decision = one action). Their effects (summons, damage, heals,
       deaths) are derived by diffing all entities' health/zone/armor across
       the block, so multi-step chains (cleave, deathrattles, auras
-      recalculating) are captured too, best-effort -- but the "gezogene
-      Karten" action lines and Discover choices are not tracked as separate
-      packet-level events; draws are inferred from the hand snapshot delta
-      between two turns, and Discover offers/picks are not shown at all
-      (known follow-up).
+      recalculating) are captured too, best-effort. "Gezogene Karten"
+      action lines aren't a separate packet-level event either -- they're
+      inferred from the hand snapshot delta between two turns. Friendly
+      Discover picks (offered + chosen) are appended as their own action at
+      the end of the turn they happened in, not nested under the play/power
+      action that triggered them -- opponent discoveries are never shown
+      (what was offered to them is never visible to us).
     - If the game reconnects mid-match, Hearthstone re-emits CREATE_GAME,
       and `parse_log` (which always reads the last game in the file) would
       then reflect only the post-reconnect fragment, missing mulligan and
@@ -567,18 +569,30 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
 # --- Mulligan ---------------------------------------------------------------
 
 
-def _collect_choice_packets(packet_tree: Any) -> tuple[list[Any], list[Any]]:
+def _collect_choice_packets(
+    packet_tree: Any, game: Game
+) -> tuple[list[tuple[int, Any]], list[Any]]:
     """Recursively find every `Choices` and `ChosenEntities` packet in the
     tree. Both are registered wherever the parser's "current block" happens
-    to be at the time (top level during mulligan), not necessarily nested
-    under a `Block`, so this walks the tree directly rather than via the
-    live exporter hooks."""
-    choices: list[Any] = []
+    to be at the time (top level during mulligan, nested inside a PLAY
+    block for an in-game Discover), not necessarily nested under a
+    `Block`, so this walks the tree directly rather than via the live
+    exporter hooks. Each `Choices` packet is paired with the global turn
+    number active when it was made (0 during mulligan, before turn 1), so
+    a later in-game choice (e.g. Discover) can be attributed to a `Turn`.
+    """
+    choices: list[tuple[int, Any]] = []
     chosen: list[Any] = []
+    current_turn = 0
 
     def visit(packet: Any) -> None:
-        if isinstance(packet, hslog_packets.Choices):
-            choices.append(packet)
+        nonlocal current_turn
+        if isinstance(packet, hslog_packets.TagChange) and packet.tag == GameTag.TURN:
+            entity_id = int(coerce_to_entity_id(packet.entity))
+            if game.find_entity_by_id(entity_id) is game:
+                current_turn = packet.value
+        elif isinstance(packet, hslog_packets.Choices):
+            choices.append((current_turn, packet))
         elif isinstance(packet, hslog_packets.ChosenEntities):
             chosen.append(packet)
         for child in getattr(packet, "packets", []):
@@ -596,8 +610,10 @@ def _entity_card_id(game: Game, entity_id: int) -> str | None:
     return get_original_card_id(entity.initial_card_id)
 
 
-def _is_friendly_mulligan_choice(choice: Any, game: Game, friendly_player: Player) -> bool:
-    if choice.type != ChoiceType.MULLIGAN:
+def _is_friendly_choice(
+    choice: Any, game: Game, friendly_player: Player, choice_type: ChoiceType
+) -> bool:
+    if choice.type != choice_type:
         return False
     entity_id = int(coerce_to_entity_id(choice.entity))
     return game.find_entity_by_id(entity_id) is friendly_player
@@ -605,6 +621,14 @@ def _is_friendly_mulligan_choice(choice: Any, game: Game, friendly_player: Playe
 
 def _resolve_card_ids(game: Game, entity_ids: list[int]) -> list[str]:
     return [cid for cid in (_entity_card_id(game, eid) for eid in entity_ids) if cid]
+
+
+def _resolve_current_names(game: Game, card_db: Any, entity_ids: list[int]) -> list[str]:
+    names = []
+    for entity_id in entity_ids:
+        entity = game.find_entity_by_id(entity_id)
+        names.append(_card_name(entity, card_db) if entity is not None else "?")
+    return names
 
 
 def _extract_mulligan(
@@ -615,9 +639,14 @@ def _extract_mulligan(
     `ChosenEntities` packet sharing its choice id gives the cards actually
     sent back (Hearthstone's mulligan choice is "which cards to replace",
     not "which to keep")."""
-    choices, chosen = _collect_choice_packets(packet_tree)
+    choices, chosen = _collect_choice_packets(packet_tree, game)
     mulligan_choice = next(
-        (c for c in choices if _is_friendly_mulligan_choice(c, game, friendly_player)), None
+        (
+            c
+            for _turn, c in choices
+            if _is_friendly_choice(c, game, friendly_player, ChoiceType.MULLIGAN)
+        ),
+        None,
     )
     if mulligan_choice is None:
         return None
@@ -629,6 +658,41 @@ def _extract_mulligan(
     kept = _resolve_card_ids(game, kept_ids)
     returned = _resolve_card_ids(game, returned_ids)
     return MulliganChoice(kept=kept, returned=returned)
+
+
+def _extract_discoveries(
+    packet_tree: Any, game: Game, card_db: Any, friendly_player: Player
+) -> list[tuple[int, Action]]:
+    """Every Discover-style choice (`ChoiceType.GENERAL`) the friendly
+    player made, as (turn_number, Action) pairs ready to attach to the
+    matching `Turn`. Opponent discoveries are not tracked -- what was
+    offered to them is never visible to us, and showing only their final
+    pick without the alternatives they had would misrepresent what they
+    "should" have done differently."""
+    choices, chosen = _collect_choice_packets(packet_tree, game)
+    picks = []
+    for turn_number, choice in choices:
+        if not _is_friendly_choice(choice, game, friendly_player, ChoiceType.GENERAL):
+            continue
+        chosen_entities = next((c for c in chosen if c.id == choice.id), None)
+        if chosen_entities is None:
+            continue
+        offered = _resolve_current_names(game, card_db, choice.choices)
+        picked = _resolve_current_names(game, card_db, chosen_entities.choices)
+        action = Action(
+            headline="Du: Discover",
+            effects=[f"Angeboten: {', '.join(offered)}", f"Gewählt: {', '.join(picked)}"],
+        )
+        picks.append((turn_number, action))
+    return picks
+
+
+def _insert_discover_actions(turns: list[Turn], picks: list[tuple[int, Action]]) -> None:
+    by_number = {turn.number: turn for turn in turns}
+    for turn_number, action in picks:
+        turn = by_number.get(turn_number)
+        if turn is not None:
+            turn.actions.append(action)
 
 
 def _deck_status(me: Player) -> tuple[list[str], list[str]]:
@@ -695,6 +759,7 @@ def parse_log(path: Path) -> ParsedGame:
     _remaining, not_in_deck = _deck_status(me)
     mulligan = _extract_mulligan(packet_tree, game, me)
     _insert_draw_actions(builder.turns)
+    _insert_discover_actions(builder.turns, _extract_discoveries(packet_tree, game, card_db, me))
 
     return ParsedGame(
         own_class=_class_name(me, card_db),
