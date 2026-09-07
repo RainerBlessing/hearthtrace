@@ -7,7 +7,7 @@ from typing import Any
 from hearthstone.cardxml import load as load_cards
 
 from hs_tracker import deck_state
-from hs_tracker.parser import HandState, MinionState, ParsedGame, Turn, TurnSnapshot
+from hs_tracker.parser import HandState, MinionState, ParsedGame, Turn, TurnSnapshot, WeaponState
 
 _RESULT_LABELS = {
     "WON": "Sieg",
@@ -51,6 +51,12 @@ def _render_hand(hand: HandState) -> list[str]:
     return lines
 
 
+def _render_weapon(weapon: WeaponState | None) -> str:
+    if weapon is None:
+        return "(keine)"
+    return f"{weapon.name} ({weapon.attack}/{weapon.durability})"
+
+
 def _render_mana_and_life(snapshot: TurnSnapshot, *, include_armor: bool) -> list[str]:
     mana = snapshot.mana
     life = snapshot.life
@@ -58,6 +64,8 @@ def _render_mana_and_life(snapshot: TurnSnapshot, *, include_armor: bool) -> lis
         f"Mana: {mana.available}/{mana.maximum} | Gesperrt: {mana.locked}"
         f" | Überladen: {mana.overload_pending}",
         f"Heldenleben: Du {life.own_health} | Gegner {life.opponent_health}",
+        f"Waffe: Du {_render_weapon(snapshot.own_weapon)}"
+        f" | Gegner {_render_weapon(snapshot.opponent_weapon)}",
     ]
     if include_armor:
         lines.append(f"Rüstung: Du {life.own_armor} | Gegner {life.opponent_armor}")

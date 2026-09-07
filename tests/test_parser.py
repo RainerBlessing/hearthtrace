@@ -29,6 +29,8 @@ from hs_tracker.parser import (
     _snapshot_entities,
     _target_suffix,
     _TurnBuilder,
+    _weapon_of,
+    _zone_transition_line,
     parse_log,
 )
 
@@ -250,6 +252,63 @@ def test_diff_effects_names_a_transform_by_pre_and_post_identity() -> None:
     lines = _diff_effects(game, namer, _friendly, before, after)
 
     assert lines == ["Void Terror #1 transformiert zu Frog #1 (1/1, kann angreifen)"]
+
+
+def test_weapon_of_returns_none_when_no_weapon_equipped() -> None:
+    game, friendly, _opponent = _make_game_with_players()
+    card_db, _ = load_cards()
+
+    assert _weapon_of(friendly, card_db) is None
+
+
+def test_weapon_of_reads_attack_and_durability() -> None:
+    game, friendly, _opponent = _make_game_with_players()
+    weapon = _register_card(
+        game, entity_id=1, card_id="CS2_106", controller=friendly, zone=Zone.PLAY
+    )
+    weapon.tag_change(GameTag.CARDTYPE, CardType.WEAPON)
+    weapon.tag_change(GameTag.ATK, 3)
+    weapon.tag_change(GameTag.DURABILITY, 2)
+    card_db, _ = load_cards()
+
+    state = _weapon_of(friendly, card_db)
+
+    assert state is not None
+    assert state.name == "Fiery War Axe"
+    assert state.attack == 3
+    assert state.durability == 2
+
+
+def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:
+    assert (
+        _zone_transition_line(CardType.WEAPON, "Fiery War Axe", True, Zone.HAND, Zone.PLAY)
+        == "Fiery War Axe ausgerüstet"
+    )
+    assert (
+        _zone_transition_line(CardType.WEAPON, "Fiery War Axe", True, Zone.PLAY, Zone.GRAVEYARD)
+        == "Fiery War Axe zerbricht"
+    )
+
+
+def test_diff_effects_shows_weapon_durability_loss() -> None:
+    # A weapon's durability change was previously invisible: `_snapshot_
+    # entities` only ever read GameTag.HEALTH (which weapons don't carry),
+    # so a before/after diff on a weapon entity always compared 0 vs 0.
+    game, friendly, _opponent = _make_game_with_players()
+    weapon = _register_card(
+        game, entity_id=1, card_id="CS2_106", controller=friendly, zone=Zone.PLAY
+    )
+    weapon.tag_change(GameTag.CARDTYPE, CardType.WEAPON)
+    weapon.tag_change(GameTag.ATK, 3)
+    weapon.tag_change(GameTag.DURABILITY, 1)
+    before = {1: (Zone.PLAY, 3, 2, 0, "CS2_106")}
+    after = _snapshot_entities(game)
+
+    card_db, _ = load_cards()
+    namer = _InstanceNamer(card_db)
+    lines = _diff_effects(game, namer, friendly, before, after)
+
+    assert lines == ["Fiery War Axe: 3/2 → 3/1"]
 
 
 def test_target_suffix_names_target_by_pre_block_identity() -> None:

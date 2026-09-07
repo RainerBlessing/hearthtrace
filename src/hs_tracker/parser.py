@@ -119,11 +119,23 @@ class BoardState:
 
 
 @dataclass
+class WeaponState:
+    name: str
+    attack: int
+    durability: int
+
+
+@dataclass
 class TurnSnapshot:
     mana: ManaState
     life: LifeState
     hand: HandState
     board: BoardState
+    # None when that player has no weapon equipped -- a player has at most
+    # one at a time, unlike minions, so (unlike `board`) this is a single
+    # optional value rather than a list.
+    own_weapon: WeaponState | None = None
+    opponent_weapon: WeaponState | None = None
 
 
 @dataclass
@@ -330,6 +342,17 @@ def _board_state(me: Player, opponent: Player, namer: "_InstanceNamer") -> Board
     return BoardState(own=_board_of(me, namer), opponent=_board_of(opponent, namer))
 
 
+def _weapon_of(player: Player, card_db: Any) -> WeaponState | None:
+    weapon = next((e for e in player.in_zone(Zone.PLAY) if e.type == CardType.WEAPON), None)
+    if weapon is None:
+        return None
+    return WeaponState(
+        name=_card_name(weapon, card_db),
+        attack=weapon.tags.get(GameTag.ATK, 0),
+        durability=weapon.tags.get(GameTag.DURABILITY, 0),
+    )
+
+
 def _turn_snapshot(
     me: Player, opponent: Player, active: Player, card_db: Any, namer: "_InstanceNamer"
 ) -> TurnSnapshot:
@@ -341,6 +364,8 @@ def _turn_snapshot(
         life=_life_state(me, opponent),
         hand=_hand_state(me, opponent, card_db),
         board=_board_state(me, opponent, namer),
+        own_weapon=_weapon_of(me, card_db),
+        opponent_weapon=_weapon_of(opponent, card_db),
     )
 
 
@@ -363,11 +388,21 @@ def _snapshot_entities(game: Game) -> _EntitySnapshot:
     for entity in game.entities:
         if entity is game or isinstance(entity, Player):
             continue
-        health = entity.tags.get(GameTag.HEALTH, 0)
-        damage = entity.tags.get(GameTag.DAMAGE, 0)
         attack = entity.tags.get(GameTag.ATK, 0)
         armor = entity.tags.get(GameTag.ARMOR, 0)
-        snapshot[entity.id] = (entity.zone, attack, health - damage, armor, entity.card_id or "")
+        if entity.type == CardType.WEAPON:
+            # Weapons track remaining uses directly via GameTag.DURABILITY
+            # (the value itself decrements) rather than a separate
+            # HEALTH/DAMAGE pair the way heroes and minions do -- there is
+            # no weapon in the committed fixture, so this is modeled from
+            # Hearthstone's known tag semantics, not yet verified against a
+            # real weapon-bearing match; revisit if that ever looks wrong.
+            vitality = entity.tags.get(GameTag.DURABILITY, 0)
+        else:
+            health = entity.tags.get(GameTag.HEALTH, 0)
+            damage = entity.tags.get(GameTag.DAMAGE, 0)
+            vitality = health - damage
+        snapshot[entity.id] = (entity.zone, attack, vitality, armor, entity.card_id or "")
     return snapshot
 
 
@@ -445,6 +480,14 @@ def _minion_zone_transition_line(name: str, zone_before: Zone, zone_after: Zone)
     return None
 
 
+def _weapon_zone_transition_line(name: str, zone_before: Zone, zone_after: Zone) -> str | None:
+    if zone_before == Zone.PLAY and zone_after == Zone.GRAVEYARD:
+        return f"{name} zerbricht"
+    if zone_after == Zone.PLAY and zone_before != Zone.PLAY:
+        return f"{name} ausgerüstet"
+    return None
+
+
 def _zone_transition_line(
     entity_type: CardType, name: str, is_friendly_owner: bool, zone_before: Zone, zone_after: Zone
 ) -> str | None:
@@ -452,6 +495,10 @@ def _zone_transition_line(
         minion_line = _minion_zone_transition_line(name, zone_before, zone_after)
         if minion_line is not None:
             return minion_line
+    if entity_type == CardType.WEAPON:
+        weapon_line = _weapon_zone_transition_line(name, zone_before, zone_after)
+        if weapon_line is not None:
+            return weapon_line
     if zone_before == Zone.SECRET and zone_after != Zone.SECRET:
         # Generic, no card-specific knowledge needed: a Secret leaving its
         # hidden zone means it just triggered (its identity is revealed as

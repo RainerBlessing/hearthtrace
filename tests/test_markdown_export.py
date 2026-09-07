@@ -12,6 +12,7 @@ from hs_tracker.parser import (
     ParsedGame,
     Turn,
     TurnSnapshot,
+    WeaponState,
 )
 
 
@@ -21,12 +22,16 @@ def _snapshot(
     life: LifeState | None = None,
     hand: HandState | None = None,
     board: BoardState | None = None,
+    own_weapon: WeaponState | None = None,
+    opponent_weapon: WeaponState | None = None,
 ) -> TurnSnapshot:
     return TurnSnapshot(
         mana=mana or ManaState(available=1, maximum=1, locked=0, overload_pending=0),
         life=life or LifeState(own_health=30, own_armor=0, opponent_health=30, opponent_armor=0),
         hand=hand or HandState(own_cards=[], opponent_count=0),
         board=board or BoardState(own=[], opponent=[]),
+        own_weapon=own_weapon,
+        opponent_weapon=opponent_weapon,
     )
 
 
@@ -267,6 +272,29 @@ def test_render_match_summary_includes_mana_life_hand_and_board_snapshot() -> No
     assert "- Hex" in markdown
     assert "Hand (Gegner): 5 Karten" in markdown
     assert "- Skywall Sentinel (0/2, Spott)" in markdown
+
+
+def test_render_match_summary_includes_weapon_line() -> None:
+    game = ParsedGame(
+        own_class="WARRIOR",
+        opponent_class="MAGE",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[
+            _turn(
+                number=3,
+                start=_snapshot(
+                    own_weapon=WeaponState(name="Fiery War Axe", attack=3, durability=2)
+                ),
+            )
+        ],
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Waffe: Du Fiery War Axe (3/2) | Gegner (keine)" in markdown
 
 
 def test_render_match_summary_omits_hand_and_armor_from_end_snapshot() -> None:
