@@ -7,7 +7,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 from hearthstone.cardxml import load as load_cards  # noqa: E402
 
 from hs_tracker.config import Config  # noqa: E402
@@ -15,7 +15,13 @@ from hs_tracker.deck_state import remaining_deck  # noqa: E402
 from hs_tracker.log_reader import find_latest_power_log  # noqa: E402
 from hs_tracker.markdown_export import export_match_summary  # noqa: E402
 from hs_tracker.match_history import format_history_row, load_match_history  # noqa: E402
-from hs_tracker.parser import NoGameFoundError, ParsedGame, parse_log  # noqa: E402
+from hs_tracker.parser import (  # noqa: E402
+    MinionState,
+    NoGameFoundError,
+    ParsedGame,
+    Turn,
+    parse_log,
+)
 
 # Terminal `PlayState` values (mirrors `markdown_export.RESULT_LABELS`'
 # terminal set). Anything else -- PLAYING, WINNING, LOSING, DISCONNECTED,
@@ -59,11 +65,34 @@ class TrackerWindow(Adw.ApplicationWindow):
         # dataset (the same one parser.py/markdown_export.py load), so
         # re-loading it every 2s would be pure waste.
         self._card_db, _ = load_cards()
+        # The most recently parsed game and which of its turns Replay is
+        # currently showing -- kept independent of `_last_log_path`/
+        # `_last_log_mtime` (which gate *whether* to re-parse) since Replay
+        # needs the actual `Turn` data, not just "did the file change".
+        # Live/current match only (no persistence): once the app restarts
+        # or a new match starts, only turns still reachable by re-parsing
+        # the current session's Power.log are ever available.
+        self._replay_game: ParsedGame | None = None
+        self._replay_turn_index = 0
+        self._replay_show_end = False
 
         header_bar = Adw.HeaderBar()
+        # Three-way exclusive toggle (Gtk.ToggleButton.set_group, GTK4's
+        # radio-button replacement) rather than Adw.ViewStack/ViewSwitcher:
+        # this window is only 320px wide, too narrow for switcher chrome to
+        # look right.
+        tracker_toggle = Gtk.ToggleButton(label="Live", active=True)
         history_toggle = Gtk.ToggleButton(label="Verlauf")
-        history_toggle.connect("toggled", self._on_history_toggled)
-        header_bar.pack_end(history_toggle)
+        replay_toggle = Gtk.ToggleButton(label="Replay")
+        history_toggle.set_group(tracker_toggle)
+        replay_toggle.set_group(tracker_toggle)
+        for button, page_name in (
+            (tracker_toggle, "tracker"),
+            (history_toggle, "history"),
+            (replay_toggle, "replay"),
+        ):
+            button.connect("toggled", self._on_view_toggled, page_name)
+            header_bar.pack_end(button)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header_bar)
@@ -79,24 +108,64 @@ class TrackerWindow(Adw.ApplicationWindow):
         history_scroller = Gtk.ScrolledWindow()
         history_scroller.set_child(self._history_list)
 
-        # A plain Gtk.Stack switched by one header-bar toggle button rather
-        # than Adw.ViewStack/ViewSwitcher: this window is only 320px wide,
-        # too narrow for the switcher chrome to look right, and there are
-        # only ever these two views.
+        replay_scroller = Gtk.ScrolledWindow()
+        replay_scroller.set_child(self._build_replay_box())
+
         self._stack = Gtk.Stack()
         self._stack.add_named(tracker_box, "tracker")
         self._stack.add_named(history_scroller, "history")
+        self._stack.add_named(replay_scroller, "replay")
         toolbar_view.set_content(self._stack)
         self.set_content(toolbar_view)
 
         GLib.timeout_add_seconds(2, self._poll)
 
-    def _on_history_toggled(self, button: Gtk.ToggleButton) -> None:
-        if button.get_active():
+    def _build_replay_box(self) -> Gtk.Box:
+        nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._replay_prev_button = Gtk.Button(label="◀")
+        self._replay_prev_button.connect("clicked", self._on_replay_prev)
+        self._replay_turn_label = Gtk.Label(label="Keine Züge verfügbar", hexpand=True)
+        self._replay_next_button = Gtk.Button(label="▶")
+        self._replay_next_button.connect("clicked", self._on_replay_next)
+        nav_box.append(self._replay_prev_button)
+        nav_box.append(self._replay_turn_label)
+        nav_box.append(self._replay_next_button)
+
+        snapshot_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._replay_start_toggle = Gtk.ToggleButton(label="Start des Zuges", active=True)
+        self._replay_end_toggle = Gtk.ToggleButton(label="Ende des Zuges")
+        self._replay_end_toggle.set_group(self._replay_start_toggle)
+        self._replay_start_toggle.connect("toggled", self._on_replay_snapshot_toggled, False)
+        self._replay_end_toggle.connect("toggled", self._on_replay_snapshot_toggled, True)
+        snapshot_box.append(self._replay_start_toggle)
+        snapshot_box.append(self._replay_end_toggle)
+
+        self._replay_content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        replay_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        replay_box.append(nav_box)
+        replay_box.append(snapshot_box)
+        replay_box.append(Gtk.Separator())
+        replay_box.append(self._replay_content_box)
+
+        # Left/Right to step turns, S/E/Space to jump straight to Start or
+        # Ende, or toggle between them -- flipping through many turns via
+        # mouse clicks alone is tedious for the exact "scan through the
+        # match" workflow Replay exists for.
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_replay_key_pressed)
+        self.add_controller(key_controller)
+
+        return replay_box
+
+    def _on_view_toggled(self, button: Gtk.ToggleButton, page_name: str) -> None:
+        if not button.get_active():
+            return
+        self._stack.set_visible_child_name(page_name)
+        if page_name == "history":
             self._refresh_history_list()
-            self._stack.set_visible_child_name("history")
-        else:
-            self._stack.set_visible_child_name("tracker")
+        elif page_name == "replay":
+            self._refresh_replay_view()
 
     def _refresh_history_list(self) -> None:
         """Rebuild the Verlauf list from every exported match on disk.
@@ -122,6 +191,172 @@ class TrackerWindow(Adw.ApplicationWindow):
             return
         for entry in entries:
             self._history_list.append(Gtk.Label(label=format_history_row(entry), xalign=0))
+
+    def _on_replay_prev(self, _button: Gtk.Button) -> None:
+        self._replay_turn_index = max(0, self._replay_turn_index - 1)
+        self._refresh_replay_view()
+
+    def _on_replay_next(self, _button: Gtk.Button) -> None:
+        if self._replay_game is not None:
+            last = len(self._replay_game.turns) - 1
+            self._replay_turn_index = min(last, self._replay_turn_index + 1)
+        self._refresh_replay_view()
+
+    def _on_replay_snapshot_toggled(self, button: Gtk.ToggleButton, show_end: bool) -> None:
+        if button.get_active():
+            self._replay_show_end = show_end
+            self._refresh_replay_view()
+
+    def _update_replay_state(self, game: ParsedGame) -> None:
+        """Track the latest parsed game for Replay, called on every
+        successful poll regardless of which view is currently visible (so
+        switching to Replay always shows up-to-date data).
+
+        Resets to the latest turn when a genuinely different match starts
+        (`game_index` changed) or the previously-viewed index no longer
+        exists; also *follows* the latest turn while the viewer was already
+        looking at it (mirrors "auto-scroll only if already at the
+        bottom") -- but leaves the index alone if the user had navigated
+        back to inspect an earlier turn, so a live-updating match doesn't
+        keep yanking them back to "now" every 2 seconds.
+        """
+        previous = self._replay_game
+        is_new_match = previous is None or game.game_index != previous.game_index
+        was_following_latest = previous is not None and (
+            self._replay_turn_index >= len(previous.turns) - 1
+        )
+        self._replay_game = game
+        if is_new_match or was_following_latest or self._replay_turn_index >= len(game.turns):
+            self._replay_turn_index = max(0, len(game.turns) - 1)
+        if self._stack.get_visible_child_name() == "replay":
+            self._refresh_replay_view()
+
+    def _on_replay_key_pressed(
+        self,
+        _controller: Gtk.EventControllerKey,
+        keyval: int,
+        _keycode: int,
+        _state: Gdk.ModifierType,
+    ) -> bool:
+        if self._stack.get_visible_child_name() != "replay":
+            return False
+        if keyval == Gdk.KEY_Left:
+            self._on_replay_prev(self._replay_prev_button)
+        elif keyval == Gdk.KEY_Right:
+            self._on_replay_next(self._replay_next_button)
+        elif keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            self._replay_start_toggle.set_active(True)
+        elif keyval in (Gdk.KEY_e, Gdk.KEY_E):
+            self._replay_end_toggle.set_active(True)
+        elif keyval == Gdk.KEY_space:
+            # Deactivating the currently-active button in a `set_group`
+            # pair does *not* automatically activate its sibling (GTK only
+            # auto-deactivates *others* when a button becomes active) --
+            # explicitly activate the target side instead of just flipping
+            # the current one off, or a toggle-off leaves neither button
+            # active and this handler's own `if button.get_active()` guard
+            # then never fires to update `_replay_show_end`.
+            target = self._replay_start_toggle if self._replay_show_end else self._replay_end_toggle
+            target.set_active(True)
+        else:
+            return False
+        return True
+
+    def _refresh_replay_view(self) -> None:
+        game = self._replay_game
+        if game is None or not game.turns:
+            self._replay_turn_label.set_label("Keine Züge verfügbar")
+            self._replay_prev_button.set_sensitive(False)
+            self._replay_next_button.set_sensitive(False)
+            self._clear_box(self._replay_content_box)
+            return
+        turn = game.turns[self._replay_turn_index]
+        self._replay_turn_label.set_label(f"Zug {turn.number} – {turn.player_name}")
+        self._replay_prev_button.set_sensitive(self._replay_turn_index > 0)
+        self._replay_next_button.set_sensitive(self._replay_turn_index < len(game.turns) - 1)
+        self._render_replay_turn(turn)
+
+    def _render_replay_turn(self, turn: Turn) -> None:
+        self._clear_box(self._replay_content_box)
+        box = self._replay_content_box
+        snapshot = turn.end if self._replay_show_end else turn.start
+
+        # `snapshot.mana` is whoever's turn it *was* -- not always "Du" --
+        # so it's attached to whichever side's line actually matches, not
+        # hardcoded onto "Du" (that previously mislabeled the opponent's
+        # own mana as the player's during an opponent turn).
+        mana_text = f"   Mana {snapshot.mana.available}/{snapshot.mana.maximum}"
+        opponent_mana = mana_text if turn.player_name == "Gegner" else ""
+        own_mana = mana_text if turn.player_name == "Du" else ""
+
+        box.append(
+            Gtk.Label(
+                label=f"Gegner: {snapshot.life.opponent_health} HP{opponent_mana}"
+                f"     Hand: {snapshot.hand.opponent_count}",
+                xalign=0,
+            )
+        )
+        box.append(self._build_board_flowbox(snapshot.board.opponent))
+        box.append(Gtk.Separator())
+        box.append(self._build_board_flowbox(snapshot.board.own))
+        box.append(
+            Gtk.Label(label=f"Du: {snapshot.life.own_health} HP{own_mana}", xalign=0)
+        )
+        hand_text = " | ".join(snapshot.hand.own_cards) if snapshot.hand.own_cards else "(leer)"
+        hand_label = Gtk.Label(label=f"Hand: {hand_text}", xalign=0)
+        hand_label.set_wrap(True)
+        box.append(hand_label)
+
+        # Actions belong to neither Start nor Ende specifically -- they're
+        # what happened *between* the two -- so they're always shown
+        # regardless of the toggle, giving the same Start -> Aktionen ->
+        # Ende picture the Markdown export already has.
+        box.append(Gtk.Separator())
+        box.append(Gtk.Label(label="Aktionen", xalign=0))
+        if not turn.actions:
+            box.append(Gtk.Label(label="(keine)", xalign=0))
+        for action in turn.actions:
+            headline_label = Gtk.Label(label=f"• {action.headline}", xalign=0)
+            headline_label.set_wrap(True)
+            box.append(headline_label)
+            for effect in action.effects:
+                effect_label = Gtk.Label(label=f"   → {effect}", xalign=0)
+                effect_label.set_wrap(True)
+                box.append(effect_label)
+
+    @staticmethod
+    def _build_board_flowbox(minions: list[MinionState]) -> Gtk.FlowBox:
+        flow = Gtk.FlowBox()
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_min_children_per_line(1)
+        flow.set_max_children_per_line(7)  # Hearthstone's own board-size cap
+        for minion in minions:
+            flow.append(TrackerWindow._build_minion_frame(minion))
+        return flow
+
+    @staticmethod
+    def _build_minion_frame(minion: MinionState) -> Gtk.Frame:
+        lines = [minion.name, f"{minion.attack}/{minion.health}"]
+        if minion.keywords:
+            lines.append(", ".join(minion.keywords))
+        label = Gtk.Label(label="\n".join(lines))
+        label.set_justify(Gtk.Justification.CENTER)
+        label.set_wrap(True)
+        label.set_margin_top(4)
+        label.set_margin_bottom(4)
+        label.set_margin_start(4)
+        label.set_margin_end(4)
+        frame = Gtk.Frame()
+        frame.set_child(label)
+        return frame
+
+    @staticmethod
+    def _clear_box(box: Gtk.Box) -> None:
+        child = box.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            box.remove(child)
+            child = next_child
 
     def _poll(self) -> bool:
         """Check the current Power.log for updates and refresh the UI.
@@ -189,6 +424,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         # export for good.
         self._refresh_deck_list(game)
         self._maybe_export(game, log_path)
+        self._update_replay_state(game)
         self._last_log_path = log_path
         self._last_log_mtime = mtime
         return True
