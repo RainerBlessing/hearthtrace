@@ -9,7 +9,9 @@ from hearthstone.cardxml import load as load_cards
 from hs_tracker import deck_state
 from hs_tracker.parser import HandState, MinionState, ParsedGame, Turn, TurnSnapshot, WeaponState
 
-_RESULT_LABELS = {
+# Public: also used by match_history.py to label a past match's result
+# consistently with how it reads in the export itself.
+RESULT_LABELS = {
     "WON": "Sieg",
     "LOST": "Niederlage",
     "TIED": "Unentschieden",
@@ -143,7 +145,7 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
     lines = [
         f"# Hearthstone Match – {when.strftime('%d.%m.%Y %H:%M')}",
         "",
-        f"**Ergebnis:** {_RESULT_LABELS.get(game.result, game.result)}",
+        f"**Ergebnis:** {RESULT_LABELS.get(game.result, game.result)}",
         f"**Eigene Klasse:** {game.own_class} | **Gegner-Klasse:** {game.opponent_class}",
         f"**{deck_label}:** {', '.join(deck_names)} ({len(deck_names)} Karten)",
         "",

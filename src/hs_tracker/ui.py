@@ -14,9 +14,10 @@ from hs_tracker.config import Config  # noqa: E402
 from hs_tracker.deck_state import remaining_deck  # noqa: E402
 from hs_tracker.log_reader import find_latest_power_log  # noqa: E402
 from hs_tracker.markdown_export import export_match_summary  # noqa: E402
+from hs_tracker.match_history import format_history_row, load_match_history  # noqa: E402
 from hs_tracker.parser import NoGameFoundError, ParsedGame, parse_log  # noqa: E402
 
-# Terminal `PlayState` values (mirrors `markdown_export._RESULT_LABELS`'
+# Terminal `PlayState` values (mirrors `markdown_export.RESULT_LABELS`'
 # terminal set). Anything else -- PLAYING, WINNING, LOSING, DISCONNECTED,
 # UNKNOWN, INVALID -- means the match is still in progress and must not
 # trigger an export yet.
@@ -37,25 +38,64 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._config = config
         self._last_log_path: Path | None = None
         self._last_log_mtime: float | None = None
-        self._last_exported_key: str | None = None
+        # Persisted to disk (not just kept in memory): restarting the app
+        # while the most recently played match's log is still the newest
+        # one on disk must not re-export it a second time -- an in-memory-
+        # only key would forget that it was already exported the moment
+        # the process restarts.
+        self._last_exported_key = self._load_last_exported_key()
         # Loaded once here rather than per poll tick: it's a static XML
         # dataset (the same one parser.py/markdown_export.py load), so
         # re-loading it every 2s would be pure waste.
         self._card_db, _ = load_cards()
 
+        header_bar = Adw.HeaderBar()
+        history_toggle = Gtk.ToggleButton(label="Verlauf")
+        history_toggle.connect("toggled", self._on_history_toggled)
+        header_bar.pack_end(history_toggle)
+
         toolbar_view = Adw.ToolbarView()
-        toolbar_view.add_top_bar(Adw.HeaderBar())
+        toolbar_view.add_top_bar(header_bar)
 
         self._status_label = Gtk.Label(label="Warte auf Hearthstone …")
         self._deck_list = Gtk.ListBox()
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.append(self._status_label)
-        box.append(self._deck_list)
-        toolbar_view.set_content(box)
+        tracker_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        tracker_box.append(self._status_label)
+        tracker_box.append(self._deck_list)
+
+        self._history_list = Gtk.ListBox()
+        history_scroller = Gtk.ScrolledWindow()
+        history_scroller.set_child(self._history_list)
+
+        # A plain Gtk.Stack switched by one header-bar toggle button rather
+        # than Adw.ViewStack/ViewSwitcher: this window is only 320px wide,
+        # too narrow for the switcher chrome to look right, and there are
+        # only ever these two views.
+        self._stack = Gtk.Stack()
+        self._stack.add_named(tracker_box, "tracker")
+        self._stack.add_named(history_scroller, "history")
+        toolbar_view.set_content(self._stack)
         self.set_content(toolbar_view)
 
         GLib.timeout_add_seconds(2, self._poll)
+
+    def _on_history_toggled(self, button: Gtk.ToggleButton) -> None:
+        if button.get_active():
+            self._refresh_history_list()
+            self._stack.set_visible_child_name("history")
+        else:
+            self._stack.set_visible_child_name("tracker")
+
+    def _refresh_history_list(self) -> None:
+        while (row := self._history_list.get_row_at_index(0)) is not None:
+            self._history_list.remove(row)
+        entries = load_match_history(self._config.export_dir)
+        if not entries:
+            self._history_list.append(Gtk.Label(label="Noch keine Partien gespeichert", xalign=0))
+            return
+        for entry in entries:
+            self._history_list.append(Gtk.Label(label=format_history_row(entry), xalign=0))
 
     def _poll(self) -> bool:
         """Check the current Power.log for updates and refresh the UI.
@@ -164,5 +204,26 @@ class TrackerWindow(Adw.ApplicationWindow):
         export_key = f"{self._last_log_path}:{game.game_index}"
         if export_key == self._last_exported_key:
             return
-        self._last_exported_key = export_key
         export_match_summary(game, export_dir=self._config.export_dir)
+        # Only recorded (in memory and on disk) once the export actually
+        # succeeded -- same reasoning as `_poll_once`'s mtime handling: a
+        # failed export (e.g. a full disk) must not be silently treated as
+        # "already done", or it would never be retried.
+        self._last_exported_key = export_key
+        self._save_last_exported_key(export_key)
+        if self._stack.get_visible_child_name() == "history":
+            self._refresh_history_list()
+
+    def _last_export_marker_path(self) -> Path:
+        return self._config.export_dir / ".last_export"
+
+    def _load_last_exported_key(self) -> str | None:
+        try:
+            return self._last_export_marker_path().read_text().strip() or None
+        except FileNotFoundError:
+            return None
+
+    def _save_last_exported_key(self, export_key: str) -> None:
+        marker = self._last_export_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(export_key)
