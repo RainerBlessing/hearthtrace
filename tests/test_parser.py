@@ -10,6 +10,7 @@ from hslog import packets as hslog_packets
 from hs_tracker.parser import (
     Action,
     NoGameFoundError,
+    _build_attack_action,
     _deck_status,
     _diff_effects,
     _extract_discoveries,
@@ -57,6 +58,50 @@ def test_mana_state_never_reports_negative_available_mana() -> None:
 
     assert mana.available == 0
     assert mana.maximum == 5
+
+
+def test_build_attack_action_narrates_a_secret_interrupted_attack() -> None:
+    # Freezing Trap-style interruption: the attacker gets bounced back to
+    # hand before dealing combat damage. Detected generically -- the
+    # attacker ends the block in Zone.HAND, and something left Zone.SECRET
+    # during it -- with no Freezing-Trap-specific logic anywhere.
+    game, friendly, opponent = _make_game_with_players()
+    attacker = _register_card(
+        game, entity_id=1, card_id="CORE_CS2_189", controller=friendly, zone=Zone.HAND
+    )
+    attacker.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    attacker.tag_change(GameTag.ATK, 3)
+    attacker.tag_change(GameTag.HEALTH, 4)
+    defender = _register_card(
+        game, entity_id=2, card_id="CORE_EX1_304", controller=opponent, zone=Zone.PLAY
+    )
+    defender.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    defender.tag_change(GameTag.ATK, 5)
+    defender.tag_change(GameTag.HEALTH, 3)
+    secret = _register_card(
+        game, entity_id=3, card_id="EX1_611", controller=opponent, zone=Zone.GRAVEYARD
+    )
+    secret.tag_change(GameTag.CARDTYPE, CardType.SPELL)
+
+    before = {
+        1: (Zone.PLAY, 3, 4, 0, "CORE_CS2_189"),
+        2: (Zone.PLAY, 5, 3, 0, "CORE_EX1_304"),
+        3: (Zone.SECRET, 0, 0, 0, ""),
+    }
+    after = _snapshot_entities(game)
+
+    card_db, _ = load_cards()
+    namer = _InstanceNamer(card_db)
+    block = SimpleNamespace(entity=1, target=2)
+    action = _build_attack_action(block, game, namer, friendly, before, after)
+
+    assert action.headline == "Du: Elven Archer #1 → Void Terror #1"
+    assert "Secret ausgelöst: Freezing Trap" in action.effects
+    assert "Elven Archer #1: Board → Hand" in action.effects
+    assert action.effects[-2:] == [
+        "Angriff abgebrochen",
+        "Void Terror #1 nimmt keinen Kampfschaden",
+    ]
 
 
 def test_generated_into_hand_line_does_not_leak_future_identity() -> None:

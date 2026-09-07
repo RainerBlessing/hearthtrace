@@ -402,17 +402,33 @@ def _zone_label(zone: Zone) -> str:
     return " (Hand)" if zone == Zone.HAND else ""
 
 
+def _minion_zone_transition_line(name: str, zone_before: Zone, zone_after: Zone) -> str | None:
+    if zone_before == Zone.PLAY and zone_after == Zone.GRAVEYARD:
+        return f"{name} stirbt"
+    if zone_before == Zone.PLAY and zone_after == Zone.HAND:
+        # e.g. bounced back by a triggered Secret mid-attack, or a
+        # "return to hand" effect -- its board-modified stats are gone,
+        # not "changed", so this replaces the generic stat-diff line.
+        return f"{name}: Board → Hand"
+    if zone_after == Zone.PLAY and zone_before != Zone.PLAY:
+        # A freshly-entered-play minion's stats are already visible in the
+        # board snapshot -- no need to also print a 0/0 -> atk/hp diff.
+        return f"{name} beschworen"
+    return None
+
+
 def _zone_transition_line(
     entity_type: CardType, name: str, is_friendly_owner: bool, zone_before: Zone, zone_after: Zone
 ) -> str | None:
     if entity_type == CardType.MINION:
-        if zone_before == Zone.PLAY and zone_after == Zone.GRAVEYARD:
-            return f"{name} stirbt"
-        if zone_after == Zone.PLAY and zone_before != Zone.PLAY:
-            # A freshly-entered-play minion's stats are already visible in
-            # the board snapshot -- no need to also print a 0/0 -> atk/hp
-            # diff for it.
-            return f"{name} beschworen"
+        minion_line = _minion_zone_transition_line(name, zone_before, zone_after)
+        if minion_line is not None:
+            return minion_line
+    if zone_before == Zone.SECRET and zone_after != Zone.SECRET:
+        # Generic, no card-specific knowledge needed: a Secret leaving its
+        # hidden zone means it just triggered (its identity is revealed as
+        # part of that, so `name` is already the real card name here).
+        return f"Secret ausgelöst: {name}"
     if zone_before == Zone.DECK and zone_after == Zone.HAND:
         return f"{name} gezogen" if is_friendly_owner else "Gegner zieht eine Karte"
     return None
@@ -572,10 +588,19 @@ def _mana_headline_suffix(mana_before: int | None, mana_after: int | None) -> st
 
 
 def _attack_headline(
-    block: Any, game: Game, namer: _InstanceNamer, friendly_player: Player, before: _EntitySnapshot
+    block: Any,
+    game: Game,
+    namer: _InstanceNamer,
+    friendly_player: Player,
+    before: _EntitySnapshot,
+    after: _EntitySnapshot,
+    interrupted: bool,
 ) -> tuple[str, frozenset[int]]:
     """Returns (headline, entity ids already folded into the headline --
-    excluded from the generic effect-line diff to avoid duplicating them)."""
+    excluded from the generic effect-line diff to avoid duplicating them).
+    `interrupted` (the attacker never actually reached the board again,
+    e.g. bounced by a triggered Secret) suppresses the hero-target life
+    fold, since no damage was actually dealt to fold in."""
     attacker = game.find_entity_by_id(block.entity)
     defender = game.find_entity_by_id(block.target)
     player_label = _player_label(attacker.controller if attacker else None, friendly_player)
@@ -586,15 +611,18 @@ def _attack_headline(
     defender_name = namer.display_name(defender, friendly_player)
     attacker_attack = before.get(block.entity, _NOT_TRACKED)[1]
 
-    if defender.type == CardType.HERO:
-        health_before = before.get(block.target, _NOT_TRACKED)[2]
-        headline = (
-            f"{player_label}: {attacker_name} ({attacker_attack} Angriff) → "
-            f"{defender_name}: {health_before} → "
-        )
-        return headline, frozenset({block.target})
+    if defender.type != CardType.HERO:
+        return f"{player_label}: {attacker_name} → {defender_name}", frozenset()
 
-    return f"{player_label}: {attacker_name} → {defender_name}", frozenset()
+    attacker_label = f"{attacker_name} ({attacker_attack} Angriff)"
+    if interrupted:
+        return f"{player_label}: {attacker_label} → {defender_name}", frozenset()
+    health_before = before.get(block.target, _NOT_TRACKED)[2]
+    health_after = after.get(block.target, _NOT_TRACKED)[2]
+    headline = (
+        f"{player_label}: {attacker_label} → {defender_name}: {health_before} → {health_after}"
+    )
+    return headline, frozenset({block.target})
 
 
 def _target_suffix(
@@ -616,6 +644,37 @@ def _target_suffix(
     return f" → Ziel: {name}"
 
 
+def _build_attack_action(
+    block: Any,
+    game: Game,
+    namer: _InstanceNamer,
+    friendly_player: Player,
+    before: _EntitySnapshot,
+    after: _EntitySnapshot,
+) -> Action:
+    # The attacker ending up back in hand (rather than staying on the
+    # board or dying) means the attack never actually connected -- most
+    # commonly a triggered Secret (Freezing Trap, ...) bounced it away.
+    # Detected generically from the zone change alone, no card-specific
+    # knowledge needed. A death mid-attack (e.g. trading into a bigger
+    # minion) is a normal combat outcome and goes through the usual path.
+    interrupted = after.get(block.entity, _NOT_TRACKED)[0] == Zone.HAND
+    headline, folded = _attack_headline(
+        block, game, namer, friendly_player, before, after, interrupted
+    )
+    effects = _diff_effects(game, namer, friendly_player, before, after, exclude=folded)
+    if interrupted:
+        effects.append("Angriff abgebrochen")
+        defender_before = before.get(block.target, _NOT_TRACKED)
+        defender_after = after.get(block.target, _NOT_TRACKED)
+        if defender_before[2] == defender_after[2]:
+            defender = game.find_entity_by_id(block.target)
+            if defender is not None:
+                defender_name = namer.display_name(defender, friendly_player)
+                effects.append(f"{defender_name} nimmt keinen Kampfschaden")
+    return Action(headline=headline, effects=effects)
+
+
 def _build_action(
     block: Any,
     game: Game,
@@ -627,14 +686,7 @@ def _build_action(
     mana_after: int | None,
 ) -> Action:
     if block.type == BlockType.ATTACK:
-        headline, folded = _attack_headline(block, game, namer, friendly_player, before)
-        if headline.endswith("→ "):
-            # Hero-target attack: fold the life change straight into the
-            # headline (per spec, no separate result line for this case).
-            health_after = after.get(block.target, _NOT_TRACKED)[2]
-            headline += str(health_after)
-        effects = _diff_effects(game, namer, friendly_player, before, after, exclude=folded)
-        return Action(headline=headline, effects=effects)
+        return _build_attack_action(block, game, namer, friendly_player, before, after)
 
     entity = game.find_entity_by_id(block.entity)
     controller = entity.controller if entity is not None else None
