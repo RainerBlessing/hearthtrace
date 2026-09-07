@@ -20,6 +20,7 @@ from hs_tracker.parser import (  # noqa: E402
     NoGameFoundError,
     ParsedGame,
     Turn,
+    TurnSnapshot,
     parse_log,
 )
 
@@ -39,6 +40,19 @@ _FINISHED_RESULTS = {"WON", "LOST", "TIED", "CONCEDED"}
 # hardcoded `CONFIG_PATH` -- no other part of this project reads XDG env
 # vars, so doing it only here would be inconsistent for no real benefit.
 _STATE_DIR = Path.home() / ".local" / "state" / "hs-tracker"
+
+# The three Replay stages, in viewing order. Kept as separate, ordered
+# stages (not e.g. a bool) specifically so "Start" never shows this turn's
+# actions -- an analysis workflow ("what would I have played here?") needs
+# to see only what was actually knowable *before* the decision, the same
+# "no future information" principle `parser.py`'s `_card_name` already
+# follows for card reveals. "Aktionen" is deliberately its own stage
+# (rather than folded into "Ende") so it can be read on its own, without
+# the resulting board state also answering the question at the same time.
+_REPLAY_STAGE_START = "start"
+_REPLAY_STAGE_ACTIONS = "actions"
+_REPLAY_STAGE_END = "end"
+_REPLAY_STAGES = (_REPLAY_STAGE_START, _REPLAY_STAGE_ACTIONS, _REPLAY_STAGE_END)
 
 
 class TrackerWindow(Adw.ApplicationWindow):
@@ -74,7 +88,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         # the current session's Power.log are ever available.
         self._replay_game: ParsedGame | None = None
         self._replay_turn_index = 0
-        self._replay_show_end = False
+        self._replay_stage = _REPLAY_STAGE_START
 
         header_bar = Adw.HeaderBar()
         # Three-way exclusive toggle (Gtk.ToggleButton.set_group, GTK4's
@@ -132,13 +146,17 @@ class TrackerWindow(Adw.ApplicationWindow):
         nav_box.append(self._replay_next_button)
 
         snapshot_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._replay_start_toggle = Gtk.ToggleButton(label="Start des Zuges", active=True)
-        self._replay_end_toggle = Gtk.ToggleButton(label="Ende des Zuges")
-        self._replay_end_toggle.set_group(self._replay_start_toggle)
-        self._replay_start_toggle.connect("toggled", self._on_replay_snapshot_toggled, False)
-        self._replay_end_toggle.connect("toggled", self._on_replay_snapshot_toggled, True)
-        snapshot_box.append(self._replay_start_toggle)
-        snapshot_box.append(self._replay_end_toggle)
+        self._replay_stage_toggles = {
+            _REPLAY_STAGE_START: Gtk.ToggleButton(label="Start", active=True),
+            _REPLAY_STAGE_ACTIONS: Gtk.ToggleButton(label="Aktionen"),
+            _REPLAY_STAGE_END: Gtk.ToggleButton(label="Ende"),
+        }
+        first_toggle = self._replay_stage_toggles[_REPLAY_STAGE_START]
+        for stage, toggle in self._replay_stage_toggles.items():
+            if toggle is not first_toggle:
+                toggle.set_group(first_toggle)
+            toggle.connect("toggled", self._on_replay_stage_toggled, stage)
+            snapshot_box.append(toggle)
 
         self._replay_content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
@@ -148,10 +166,10 @@ class TrackerWindow(Adw.ApplicationWindow):
         replay_box.append(Gtk.Separator())
         replay_box.append(self._replay_content_box)
 
-        # Left/Right to step turns, S/E/Space to jump straight to Start or
-        # Ende, or toggle between them -- flipping through many turns via
-        # mouse clicks alone is tedious for the exact "scan through the
-        # match" workflow Replay exists for.
+        # Left/Right to step turns; S/A/E to jump straight to a stage,
+        # Space to step forward through Start -> Aktionen -> Ende -- paging
+        # through many turns via mouse clicks alone is tedious for the
+        # exact "scan through the match" workflow Replay exists for.
         key_controller = Gtk.EventControllerKey()
         key_controller.connect("key-pressed", self._on_replay_key_pressed)
         self.add_controller(key_controller)
@@ -202,9 +220,9 @@ class TrackerWindow(Adw.ApplicationWindow):
             self._replay_turn_index = min(last, self._replay_turn_index + 1)
         self._refresh_replay_view()
 
-    def _on_replay_snapshot_toggled(self, button: Gtk.ToggleButton, show_end: bool) -> None:
+    def _on_replay_stage_toggled(self, button: Gtk.ToggleButton, stage: str) -> None:
         if button.get_active():
-            self._replay_show_end = show_end
+            self._replay_stage = stage
             self._refresh_replay_view()
 
     def _update_replay_state(self, game: ParsedGame) -> None:
@@ -245,19 +263,21 @@ class TrackerWindow(Adw.ApplicationWindow):
         elif keyval == Gdk.KEY_Right:
             self._on_replay_next(self._replay_next_button)
         elif keyval in (Gdk.KEY_s, Gdk.KEY_S):
-            self._replay_start_toggle.set_active(True)
+            self._replay_stage_toggles[_REPLAY_STAGE_START].set_active(True)
+        elif keyval in (Gdk.KEY_a, Gdk.KEY_A):
+            self._replay_stage_toggles[_REPLAY_STAGE_ACTIONS].set_active(True)
         elif keyval in (Gdk.KEY_e, Gdk.KEY_E):
-            self._replay_end_toggle.set_active(True)
+            self._replay_stage_toggles[_REPLAY_STAGE_END].set_active(True)
         elif keyval == Gdk.KEY_space:
-            # Deactivating the currently-active button in a `set_group`
-            # pair does *not* automatically activate its sibling (GTK only
-            # auto-deactivates *others* when a button becomes active) --
-            # explicitly activate the target side instead of just flipping
-            # the current one off, or a toggle-off leaves neither button
-            # active and this handler's own `if button.get_active()` guard
-            # then never fires to update `_replay_show_end`.
-            target = self._replay_start_toggle if self._replay_show_end else self._replay_end_toggle
-            target.set_active(True)
+            # Explicitly activate the *next* stage's own button rather than
+            # deactivating the current one: deactivating the currently-
+            # active button in a `set_group` pair does not automatically
+            # activate a sibling (GTK only auto-deactivates *others* when a
+            # button becomes active), which would leave nothing active and
+            # this handler's own `if button.get_active()` guard would then
+            # never fire to update `_replay_stage`.
+            next_index = (_REPLAY_STAGES.index(self._replay_stage) + 1) % len(_REPLAY_STAGES)
+            self._replay_stage_toggles[_REPLAY_STAGES[next_index]].set_active(True)
         else:
             return False
         return True
@@ -277,9 +297,25 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._render_replay_turn(turn)
 
     def _render_replay_turn(self, turn: Turn) -> None:
+        """Renders exactly one of the three stages -- never more than one.
+
+        Deliberately *not* "Start always shows this turn's actions too":
+        for the "what would I have played here?" analysis workflow, Start
+        must show only what was actually knowable *before* the decision,
+        the same "no future information" principle `parser.py`'s
+        `_card_name` already follows for card reveals -- showing this
+        turn's outcome (its actions, or the Ende board) while still on
+        Start would silently answer the question being asked.
+        """
         self._clear_box(self._replay_content_box)
+        if self._replay_stage == _REPLAY_STAGE_ACTIONS:
+            self._render_replay_actions(turn)
+        else:
+            snapshot = turn.end if self._replay_stage == _REPLAY_STAGE_END else turn.start
+            self._render_replay_snapshot(turn, snapshot)
+
+    def _render_replay_snapshot(self, turn: Turn, snapshot: TurnSnapshot) -> None:
         box = self._replay_content_box
-        snapshot = turn.end if self._replay_show_end else turn.start
 
         # `snapshot.mana` is whoever's turn it *was* -- not always "Du" --
         # so it's attached to whichever side's line actually matches, not
@@ -289,32 +325,30 @@ class TrackerWindow(Adw.ApplicationWindow):
         opponent_mana = mana_text if turn.player_name == "Gegner" else ""
         own_mana = mana_text if turn.player_name == "Du" else ""
 
-        box.append(
-            Gtk.Label(
-                label=f"Gegner: {snapshot.life.opponent_health} HP{opponent_mana}"
-                f"     Hand: {snapshot.hand.opponent_count}",
-                xalign=0,
-            )
+        opponent_header = Gtk.Label(xalign=0)
+        opponent_header.set_markup(
+            f"<b>GEGNER</b> — {snapshot.life.opponent_health} HP{opponent_mana}"
+            f" — Hand {snapshot.hand.opponent_count}"
         )
+        box.append(opponent_header)
         box.append(self._build_board_flowbox(snapshot.board.opponent))
         box.append(Gtk.Separator())
+
+        own_header = Gtk.Label(xalign=0)
+        own_header.set_markup(f"<b>DU</b> — {snapshot.life.own_health} HP{own_mana}")
+        own_header.set_margin_top(8)
+        box.append(own_header)
         box.append(self._build_board_flowbox(snapshot.board.own))
-        box.append(
-            Gtk.Label(label=f"Du: {snapshot.life.own_health} HP{own_mana}", xalign=0)
-        )
         hand_text = " | ".join(snapshot.hand.own_cards) if snapshot.hand.own_cards else "(leer)"
         hand_label = Gtk.Label(label=f"Hand: {hand_text}", xalign=0)
         hand_label.set_wrap(True)
         box.append(hand_label)
 
-        # Actions belong to neither Start nor Ende specifically -- they're
-        # what happened *between* the two -- so they're always shown
-        # regardless of the toggle, giving the same Start -> Aktionen ->
-        # Ende picture the Markdown export already has.
-        box.append(Gtk.Separator())
-        box.append(Gtk.Label(label="Aktionen", xalign=0))
+    def _render_replay_actions(self, turn: Turn) -> None:
+        box = self._replay_content_box
         if not turn.actions:
-            box.append(Gtk.Label(label="(keine)", xalign=0))
+            box.append(Gtk.Label(label="(keine Aktionen diesen Zug)", xalign=0))
+            return
         for action in turn.actions:
             headline_label = Gtk.Label(label=f"• {action.headline}", xalign=0)
             headline_label.set_wrap(True)
