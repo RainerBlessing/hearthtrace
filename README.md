@@ -62,17 +62,23 @@ export_dir = "~/HearthstoneAnalysis"
    Enthalten sind Ergebnis, Klassen, Deck (bzw. "Bekannte Deck-Karten",
    solange nicht alle 30 gesehen wurden), Mulligan (behalten/zurückgelegt)
    und Restdeck bei Spielende, sowie pro Zug:
+   - **Zugbeginn**: der automatische Kartenzug dieses Zugs (falls einer
+     stattfand) — steht separat oberhalb von Start, nicht als Aktion, da
+     `Start` die Hand bereits danach zeigt.
    - **Start**: vollständiger Entscheidungszustand — Mana (verfügbar/
-     Maximum/Überladen), Heldenleben & Rüstung, eigene Hand (Gegner nur als
-     Kartenanzahl — verdeckte Information wird nie aufgedeckt), Board
-     beider Seiten (Angriff/Leben, relevante Zustände wie Spott/Göttlicher
-     Schild). Gleichnamige Diener bekommen eine stabile `#N`-Kennung, um
-     sie über den Zug hinweg auseinanderzuhalten.
+     Maximum/gesperrt/Überladen), Heldenleben & Rüstung, eigene Hand
+     (Gegner nur als Kartenanzahl — verdeckte Information wird nie
+     aufgedeckt), Board beider Seiten (Angriff/Leben, relevante Zustände
+     wie Spott/Göttlicher Schild). Gleichnamige Diener bekommen eine
+     stabile `#N`-Kennung, um sie über den Zug hinweg auseinanderzuhalten;
+     bei Transformationen (Hex, Verwandlung, …) wird sowohl die
+     ursprüngliche als auch die neue Identität genannt.
    - **Aktionen**: nummerierte Ereignisliste — Karten/Heldenkräfte mit
      Mana-Verbrauch und Zauberziel, gerichtete Angriffe mit Ergebnis,
-     Kartenziehen (auch durch Effekte mitten im Zug, nicht nur der normale
-     Zug-Draw) und eigene Discover-Auswahlen (angebotene Karten + Wahl —
-     beim Gegner naturgemäß nicht sichtbar).
+     Kartenziehen durch Effekte mitten im Zug, generierte Karten mit
+     Quellenangabe (z. B. "Karte X → erzeugt Karte Y") und eigene
+     Discover-Auswahlen (angebotene Karten + Wahl — beim Gegner
+     naturgemäß nicht sichtbar).
    - **Ende**: bewusst schlank — nur Mana/Heldenleben/Board, da Hand- und
      Rüstungsänderungen schon in den Aktionen stehen.
 
