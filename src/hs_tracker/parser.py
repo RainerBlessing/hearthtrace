@@ -4,6 +4,7 @@ This module isolates the rest of the app from the `hslog`/`hearthstone`
 package internals: callers only ever see `ParsedGame`.
 """
 
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -219,12 +220,19 @@ def _player_label(player: Player | None, friendly_player: Player) -> str:
 
 
 def _mana_state(player: Player) -> ManaState:
+    # Sourced directly from Hearthstone's own RESOURCES/RESOURCES_USED/
+    # OVERLOAD_LOCKED tags -- these already reflect any cost discount the
+    # game applied, so there's no need (or reason to trust our own guess
+    # over the game's) to compute a cost ourselves. `max(0, ...)` only
+    # guards the *display*: a real match showed RESOURCES_USED transiently
+    # exceeding available crystals for a cost-modified card, and negative
+    # mana must never appear in the export regardless of why that happens.
     resources = player.tags.get(GameTag.RESOURCES, 0)
     used = player.tags.get(GameTag.RESOURCES_USED, 0)
     locked = player.tags.get(GameTag.OVERLOAD_LOCKED, 0)
     overload_pending = player.tags.get(GameTag.OVERLOAD, 0)
     return ManaState(
-        available=resources - used - locked,
+        available=max(0, resources - used - locked),
         maximum=resources,
         locked=locked,
         overload_pending=overload_pending,
@@ -243,9 +251,21 @@ def _life_state(me: Player, opponent: Player) -> LifeState:
     )
 
 
+# A card whose identity is still hidden when first displayed (typically an
+# opponent's hand card, or a card generated into a hidden hand) gets this
+# placeholder instead of a hard "Unbekannte Karte" -- if the game later
+# reveals it (the opponent plays it, an effect shows it, ...), a final pass
+# in `parse_log` resolves every occurrence to the real name. Falls back to
+# literal "Unbekannte Karte" for whatever is still unrevealed by then.
+_UNKNOWN_CARD_TOKEN = "\x00UNKNOWN#{}\x00"
+_UNKNOWN_CARD_RE = re.compile(r"\x00UNKNOWN#(\d+)\x00")
+
+
 def _card_name(entity: Entity, card_db: Any) -> str:
-    card = card_db.get(entity.card_id) if entity.card_id else None
-    return str(card.name) if card else (entity.card_id or "Unbekannte Karte")
+    if not entity.card_id:
+        return _UNKNOWN_CARD_TOKEN.format(entity.id)
+    card = card_db.get(entity.card_id)
+    return str(card.name) if card else entity.card_id
 
 
 def _hand_state(me: Player, opponent: Player, card_db: Any) -> HandState:
@@ -371,6 +391,21 @@ class _InstanceNamer:
         return _card_name(entity, self._card_db)
 
 
+# Zones a player actually sees and can reason about: the board (either
+# side) and their own hand. A minion buffed while sitting in some other,
+# internal-only zone (e.g. a candidate-summon pool a card's implementation
+# uses to compute which tokens to actually place) never becomes visible to
+# either player and would just be confusing noise in the export.
+_VISIBLE_ZONES = frozenset({Zone.PLAY, Zone.HAND})
+
+
+def _zone_label(zone: Zone) -> str:
+    # Board changes read naturally without a zone tag (that's the default
+    # expectation); a change to something sitting in a hand needs to say so
+    # explicitly, or it reads as if it just appeared on the board.
+    return " (Hand)" if zone == Zone.HAND else ""
+
+
 def _zone_transition_line(
     entity_type: CardType, name: str, is_friendly_owner: bool, zone_before: Zone, zone_after: Zone
 ) -> str | None:
@@ -394,15 +429,18 @@ def _stat_diff_lines(
     current: tuple[Zone, int, int, int, str],
 ) -> list[str]:
     _zone_before, attack_before, health_before, armor_before, _card_id_before = previous
-    _zone_after, attack_after, health_after, armor_after, _card_id_after = current
+    zone_after, attack_after, health_after, armor_after, _card_id_after = current
+    label = f"{name}{_zone_label(zone_after)}"
     lines = []
     if health_after != health_before or (not is_hero and attack_after != attack_before):
         if is_hero:
-            lines.append(f"{name}: {health_before} → {health_after}")
+            lines.append(f"{label}: {health_before} → {health_after}")
         else:
-            lines.append(f"{name}: {attack_before}/{health_before} → {attack_after}/{health_after}")
+            lines.append(
+                f"{label}: {attack_before}/{health_before} → {attack_after}/{health_after}"
+            )
     if armor_after != armor_before:
-        lines.append(f"{name}: Rüstung {armor_before} → {armor_after}")
+        lines.append(f"{label}: Rüstung {armor_before} → {armor_after}")
     return lines
 
 
@@ -421,13 +459,21 @@ def _entity_diff_lines(
         return [transition]
     if previous is None:
         return []
-    return _stat_diff_lines(entity_type == CardType.HERO, name, previous, current)
+    if resolved_previous[0] not in _VISIBLE_ZONES and current[0] not in _VISIBLE_ZONES:
+        # Neither before nor after touches the board or a hand -- this
+        # entity was never visible to either player, so its stat churn
+        # (e.g. a card implementation's internal candidate-summon pool)
+        # isn't something that "happened" from the player's perspective.
+        return []
+    return _stat_diff_lines(entity_type == CardType.HERO, name, resolved_previous, current)
 
 
-def _format_minion_stats(entity: Entity) -> str:
+def _format_minion_stats(entity: Entity, zone: Zone) -> str:
     attack = entity.tags.get(GameTag.ATK, 0)
     health = entity.tags.get(GameTag.HEALTH, 0) - entity.tags.get(GameTag.DAMAGE, 0)
-    keywords = _minion_keywords(entity)
+    # Keywords like Taunt or "kann angreifen" are board concepts -- showing
+    # them for a card sitting in hand would be misleading.
+    keywords = _minion_keywords(entity) if zone == Zone.PLAY else []
     if keywords:
         return f"{attack}/{health}, {', '.join(keywords)}"
     return f"{attack}/{health}"
@@ -440,20 +486,24 @@ def _transform_line(
     previous: tuple[Zone, int, int, int, str] | None,
     current: tuple[Zone, int, int, int, str],
 ) -> str | None:
-    """A minion that changes card id while staying on the board (Hex,
-    Polymorph, ...) keeps the same entity id, so the generic diff would
-    otherwise just report it as an ordinary stat change under its *new*
-    name -- losing which minion was actually targeted. Named explicitly
-    instead: "{old} transformiert zu {new} (atk/hp, keywords)"."""
+    """A minion that changes card id while staying in the same visible
+    zone (Hex/Polymorph on the board, or a hand card whose generated
+    identity resolves to something else) keeps the same entity id, so the
+    generic diff would otherwise just report it as an ordinary stat change
+    under its *new* name -- losing which minion was actually targeted or
+    replaced. Named explicitly instead: "{old} transformiert zu {new}
+    (atk/hp, keywords)", tagged "(Hand)" when that's where it happened."""
     if entity.type != CardType.MINION or previous is None:
         return None
     zone_before, _attack_before, _health_before, _armor_before, card_id_before = previous
     zone_after, _attack_after, _health_after, _armor_after, card_id_after = current
-    if zone_before != Zone.PLAY or zone_after != Zone.PLAY or card_id_before == card_id_after:
+    if zone_before != zone_after or zone_before not in _VISIBLE_ZONES:
         return None
-    old_name = namer.minion_name_for_card_id(entity.id, card_id_before)
+    if card_id_before == card_id_after:
+        return None
+    old_name = namer.minion_name_for_card_id(entity.id, card_id_before) + _zone_label(zone_before)
     new_name = namer.display_name(entity, friendly_player)
-    return f"{old_name} transformiert zu {new_name} ({_format_minion_stats(entity)})"
+    return f"{old_name} transformiert zu {new_name} ({_format_minion_stats(entity, zone_after)})"
 
 
 def _generated_into_hand_line(
@@ -682,58 +732,30 @@ class _TurnBuilder:
             end=_turn_snapshot(me, opponent, active, self._card_db, self._namer),
         )
 
-    def before_block(
-        self, block: Any, game: Game
-    ) -> tuple[_EntitySnapshot, int | None, int | None] | None:
+    def before_block(self, block: Any, game: Game) -> tuple[_EntitySnapshot, int | None] | None:
         if block.type not in _ACTION_BLOCK_TYPES or self._current is None:
             return None
         controller = self._block_controller(block, game)
         mana_before = _mana_state(controller).available if controller is not None else None
-        return _snapshot_entities(game), mana_before, self._card_cost(block, game)
+        return _snapshot_entities(game), mana_before
 
     def after_block(
-        self, block: Any, game: Game, before: tuple[_EntitySnapshot, int | None, int | None]
+        self, block: Any, game: Game, before: tuple[_EntitySnapshot, int | None]
     ) -> None:
         if self._current is None:
             return
         me, _opponent = self._players(game)
-        before_entities, mana_before, card_cost = before
+        before_entities, mana_before = before
         after_entities = _snapshot_entities(game)
-        mana_after = self._mana_after(block, game, mana_before, card_cost)
+        controller = self._block_controller(block, game)
+        # `_mana_state` already clamps at 0 -- trust the game's own tags
+        # rather than computing a cost ourselves (a card's *actual* cost,
+        # discounts included, is exactly what those tags already reflect).
+        mana_after = _mana_state(controller).available if controller is not None else None
         action = _build_action(
             block, game, self._namer, me, before_entities, after_entities, mana_before, mana_after
         )
         self._current.actions.append(action)
-
-    @staticmethod
-    def _card_cost(block: Any, game: Game) -> int | None:
-        # Read live, right before the block runs. Only meaningful for an
-        # entity we can actually see the cost of at that point -- a hidden
-        # opponent hand card's COST tag isn't populated yet (it's revealed
-        # *during* this same block), so this legitimately returns None for
-        # those; the live RESOURCES_USED diff below still handles them.
-        if block.type not in (BlockType.PLAY, BlockType.POWER):
-            return None
-        entity = game.find_entity_by_id(block.entity)
-        if entity is None or not entity.revealed:
-            return None
-        return entity.tags.get(GameTag.COST, 0)
-
-    def _mana_after(
-        self, block: Any, game: Game, mana_before: int | None, card_cost: int | None
-    ) -> int | None:
-        controller = self._block_controller(block, game)
-        live_after = _mana_state(controller).available if controller is not None else None
-        if live_after is not None and live_after >= 0:
-            return live_after
-        # The live-diffed RESOURCES_USED went negative -- impossible in a
-        # real game (observed for a cost-discounted card in a real match,
-        # e.g. Ultraxion). Fall back to the card's own live cost, which
-        # reflects any discount already applied, instead of ever showing
-        # negative mana.
-        if card_cost is not None and mana_before is not None:
-            return max(0, mana_before - card_cost)
-        return live_after
 
     @staticmethod
     def _block_controller(block: Any, game: Game) -> Player | None:
@@ -971,6 +993,39 @@ def _insert_opening_draws(turns: list[Turn]) -> None:
         current.opening_draws = _opening_draw_lines(previous.end.hand, current.start.hand)
 
 
+def _resolve_unknown_card_names(turns: list[Turn], game: Game, card_db: Any) -> None:
+    """Replace every `_UNKNOWN_CARD_TOKEN` placeholder with the real card
+    name if the game revealed that entity's identity by the end of the
+    match (e.g. the opponent played a card that was generated hidden), or
+    with a plain "Unbekannte Karte" if it never did."""
+
+    def resolve_one(match: re.Match[str]) -> str:
+        entity = game.find_entity_by_id(int(match.group(1)))
+        if entity is not None and entity.card_id:
+            card = card_db.get(entity.card_id)
+            return str(card.name) if card else entity.card_id
+        return "Unbekannte Karte"
+
+    def resolve(text: str) -> str:
+        return _UNKNOWN_CARD_RE.sub(resolve_one, text)
+
+    def resolve_hand(hand: HandState) -> None:
+        hand.own_cards = [resolve(name) for name in hand.own_cards]
+
+    def resolve_board(board: BoardState) -> None:
+        for minion in board.own + board.opponent:
+            minion.name = resolve(minion.name)
+
+    for turn in turns:
+        turn.opening_draws = [resolve(line) for line in turn.opening_draws]
+        for snapshot in (turn.start, turn.end):
+            resolve_hand(snapshot.hand)
+            resolve_board(snapshot.board)
+        for action in turn.actions:
+            action.headline = resolve(action.headline)
+            action.effects = [resolve(effect) for effect in action.effects]
+
+
 def parse_log(path: Path) -> ParsedGame:
     parser = LogParser()
     with path.open() as f:
@@ -993,6 +1048,7 @@ def parse_log(path: Path) -> ParsedGame:
     mulligan = _extract_mulligan(packet_tree, game, me)
     _insert_opening_draws(builder.turns)
     _insert_discover_actions(builder.turns, _extract_discoveries(packet_tree, game, card_db, me))
+    _resolve_unknown_card_names(builder.turns, game, card_db)
 
     return ParsedGame(
         own_class=_class_name(me, card_db),

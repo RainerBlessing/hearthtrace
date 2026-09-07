@@ -8,13 +8,22 @@ from hearthstone.enums import CardType, ChoiceType, GameTag, Zone
 from hslog import packets as hslog_packets
 
 from hs_tracker.parser import (
+    _UNKNOWN_CARD_TOKEN,
     Action,
+    BoardState,
+    HandState,
+    LifeState,
+    ManaState,
     NoGameFoundError,
+    Turn,
+    TurnSnapshot,
     _deck_status,
     _diff_effects,
     _extract_discoveries,
     _extract_mulligan,
     _InstanceNamer,
+    _mana_state,
+    _resolve_unknown_card_names,
     _snapshot_entities,
     _target_suffix,
     parse_log,
@@ -41,6 +50,80 @@ def _register_card(
     card.tag_change(GameTag.CONTROLLER, controller.player_id)
     game.register_entity(card)
     return card
+
+
+def test_mana_state_never_reports_negative_available_mana() -> None:
+    # Observed in a real match: RESOURCES_USED transiently exceeding
+    # available crystals for a cost-modified card (e.g. Ultraxion) made the
+    # raw tag arithmetic go negative. The export must never show that,
+    # regardless of why the underlying tags are momentarily inconsistent.
+    _game, friendly, _opponent = _make_game_with_players()
+    friendly.tag_change(GameTag.RESOURCES, 5)
+    friendly.tag_change(GameTag.RESOURCES_USED, 9)
+
+    mana = _mana_state(friendly)
+
+    assert mana.available == 0
+    assert mana.maximum == 5
+
+
+def _make_snapshot() -> TurnSnapshot:
+    return TurnSnapshot(
+        mana=ManaState(available=0, maximum=0, locked=0, overload_pending=0),
+        life=LifeState(own_health=30, own_armor=0, opponent_health=30, opponent_armor=0),
+        hand=HandState(own_cards=[], opponent_count=0),
+        board=BoardState(own=[], opponent=[]),
+    )
+
+
+def test_resolve_unknown_card_names_fills_in_a_later_reveal() -> None:
+    # A card generated hidden into the opponent's hand (e.g. Selective
+    # Breeder) is correctly unknown when first shown -- but once the
+    # opponent actually plays it, its identity becomes public, and the
+    # earlier "Unbekannte Karte gespielt" text must be resolved to the
+    # real name rather than staying permanently unresolved.
+    game, _friendly, opponent = _make_game_with_players()
+    revealed = _register_card(game, entity_id=99, card_id="CS2_022", controller=opponent)
+
+    placeholder = _UNKNOWN_CARD_TOKEN.format(99)
+    turn = Turn(
+        number=1,
+        player_name="Gegner",
+        opening_draws=[f"{placeholder} gezogen"],
+        start=_make_snapshot(),
+        actions=[
+            Action(
+                headline=f"Gegner: {placeholder} gespielt", effects=[f"{placeholder} beschworen"]
+            )
+        ],
+        end=_make_snapshot(),
+    )
+
+    card_db, _ = load_cards()
+    _resolve_unknown_card_names([turn], game, card_db)
+
+    assert turn.opening_draws == ["Polymorph gezogen"]
+    assert turn.actions[0].headline == "Gegner: Polymorph gespielt"
+    assert turn.actions[0].effects == ["Polymorph beschworen"]
+    assert revealed.card_id == "CS2_022"  # sanity: the fixture entity itself is untouched
+
+
+def test_resolve_unknown_card_names_falls_back_when_never_revealed() -> None:
+    game, _friendly, _opponent = _make_game_with_players()
+    placeholder = _UNKNOWN_CARD_TOKEN.format(12345)
+    turn = Turn(
+        number=1,
+        player_name="Gegner",
+        opening_draws=[],
+        start=_make_snapshot(),
+        actions=[Action(headline=f"Gegner: {placeholder} gespielt")],
+        end=_make_snapshot(),
+    )
+
+    card_db, _ = load_cards()
+    _resolve_unknown_card_names([turn], game, card_db)
+
+    assert turn.actions[0].headline == "Gegner: Unbekannte Karte gespielt"
 
 
 def test_diff_effects_names_a_transform_by_pre_and_post_identity() -> None:
@@ -274,6 +357,29 @@ def test_parse_log_numbers_identical_minions_to_tell_them_apart() -> None:
 
     assert "Soldier of Al'Akir #4" in names
     assert "Soldier of Al'Akir #5" in names
+
+
+def test_parse_log_filters_out_stat_changes_to_entities_never_on_board() -> None:
+    # Turn 7: Ritual of Power's implementation touches several internal
+    # "Soldier of Al'Akir" candidate entities that never actually reach
+    # Zone.PLAY (only #4 and the newly-summoned #5 really end up on the
+    # board, per the board snapshot) -- their stat churn is invisible to
+    # both players and must not appear as if it happened on the board.
+    game = parse_log(FIXTURE)
+    turn7 = next(t for t in game.turns if t.number == 7)
+
+    ritual = next(a for a in turn7.actions if "Ritual of Power gespielt" in a.headline)
+    board_names = {m.name for m in turn7.end.board.own}
+
+    assert board_names == {
+        "Wailing Vapor #1",
+        "Skywall Sentinel #1",
+        "Soldier of Al'Akir #4",
+        "Soldier of Al'Akir #5",
+    }
+    assert not any("#1:" in e or "#2:" in e or "#3:" in e for e in ritual.effects)
+    assert "Soldier of Al'Akir #4: 1/2 → 2/2" in ritual.effects
+    assert "Soldier of Al'Akir #5 beschworen" in ritual.effects
 
 
 def test_parse_log_captures_effect_triggered_draw_mid_action() -> None:
