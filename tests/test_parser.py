@@ -8,22 +8,14 @@ from hearthstone.enums import CardType, ChoiceType, GameTag, Zone
 from hslog import packets as hslog_packets
 
 from hs_tracker.parser import (
-    _UNKNOWN_CARD_TOKEN,
     Action,
-    BoardState,
-    HandState,
-    LifeState,
-    ManaState,
     NoGameFoundError,
-    Turn,
-    TurnSnapshot,
     _deck_status,
     _diff_effects,
     _extract_discoveries,
     _extract_mulligan,
     _InstanceNamer,
     _mana_state,
-    _resolve_unknown_card_names,
     _snapshot_entities,
     _target_suffix,
     parse_log,
@@ -67,63 +59,38 @@ def test_mana_state_never_reports_negative_available_mana() -> None:
     assert mana.maximum == 5
 
 
-def _make_snapshot() -> TurnSnapshot:
-    return TurnSnapshot(
-        mana=ManaState(available=0, maximum=0, locked=0, overload_pending=0),
-        life=LifeState(own_health=30, own_armor=0, opponent_health=30, opponent_armor=0),
-        hand=HandState(own_cards=[], opponent_count=0),
-        board=BoardState(own=[], opponent=[]),
+def test_generated_into_hand_line_does_not_leak_future_identity() -> None:
+    # A card generated hidden into a hand must show as "Unbekannte Karte"
+    # at that point -- its identity must never be resolved using knowledge
+    # from later in the match (e.g. once it's actually played and becomes
+    # public). A later, *separate* resolution of the same entity is fine
+    # and expected to show the real name by then; the earlier line itself
+    # must never be rewritten.
+    game, friendly, opponent = _make_game_with_players()
+    source = _register_card(
+        game, entity_id=1, card_id="CORE_CS2_189", controller=opponent, zone=Zone.PLAY
     )
+    source.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    generated = _register_card(game, entity_id=2, card_id="", controller=opponent, zone=Zone.HAND)
+    generated.initial_creator = 1
 
-
-def test_resolve_unknown_card_names_fills_in_a_later_reveal() -> None:
-    # A card generated hidden into the opponent's hand (e.g. Selective
-    # Breeder) is correctly unknown when first shown -- but once the
-    # opponent actually plays it, its identity becomes public, and the
-    # earlier "Unbekannte Karte gespielt" text must be resolved to the
-    # real name rather than staying permanently unresolved.
-    game, _friendly, opponent = _make_game_with_players()
-    revealed = _register_card(game, entity_id=99, card_id="CS2_022", controller=opponent)
-
-    placeholder = _UNKNOWN_CARD_TOKEN.format(99)
-    turn = Turn(
-        number=1,
-        player_name="Gegner",
-        opening_draws=[f"{placeholder} gezogen"],
-        start=_make_snapshot(),
-        actions=[
-            Action(
-                headline=f"Gegner: {placeholder} gespielt", effects=[f"{placeholder} beschworen"]
-            )
-        ],
-        end=_make_snapshot(),
-    )
+    before: dict = {1: (Zone.PLAY, 0, 0, 0, "CORE_CS2_189")}  # source already on board
+    after = _snapshot_entities(game)
 
     card_db, _ = load_cards()
-    _resolve_unknown_card_names([turn], game, card_db)
+    namer = _InstanceNamer(card_db)
+    lines = _diff_effects(game, namer, friendly, before, after)
 
-    assert turn.opening_draws == ["Polymorph gezogen"]
-    assert turn.actions[0].headline == "Gegner: Polymorph gespielt"
-    assert turn.actions[0].effects == ["Polymorph beschworen"]
-    assert revealed.card_id == "CS2_022"  # sanity: the fixture entity itself is untouched
+    assert lines == ["Elven Archer #1 → erzeugt Unbekannte Karte"]
 
+    # Later in the match, the same entity gets revealed -- a *fresh*
+    # resolution at that later point correctly shows the real name; the
+    # already-built line above is never retroactively rewritten.
+    generated.card_id = "CORE_EX1_304"
+    generated.tag_change(GameTag.CARDTYPE, CardType.MINION)
 
-def test_resolve_unknown_card_names_falls_back_when_never_revealed() -> None:
-    game, _friendly, _opponent = _make_game_with_players()
-    placeholder = _UNKNOWN_CARD_TOKEN.format(12345)
-    turn = Turn(
-        number=1,
-        player_name="Gegner",
-        opening_draws=[],
-        start=_make_snapshot(),
-        actions=[Action(headline=f"Gegner: {placeholder} gespielt")],
-        end=_make_snapshot(),
-    )
-
-    card_db, _ = load_cards()
-    _resolve_unknown_card_names([turn], game, card_db)
-
-    assert turn.actions[0].headline == "Gegner: Unbekannte Karte gespielt"
+    assert namer.display_name(generated, friendly) == "Void Terror #1"
+    assert lines == ["Elven Archer #1 → erzeugt Unbekannte Karte"]
 
 
 def test_diff_effects_names_a_transform_by_pre_and_post_identity() -> None:

@@ -4,7 +4,6 @@ This module isolates the rest of the app from the `hslog`/`hearthstone`
 package internals: callers only ever see `ParsedGame`.
 """
 
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -251,19 +250,16 @@ def _life_state(me: Player, opponent: Player) -> LifeState:
     )
 
 
-# A card whose identity is still hidden when first displayed (typically an
-# opponent's hand card, or a card generated into a hidden hand) gets this
-# placeholder instead of a hard "Unbekannte Karte" -- if the game later
-# reveals it (the opponent plays it, an effect shows it, ...), a final pass
-# in `parse_log` resolves every occurrence to the real name. Falls back to
-# literal "Unbekannte Karte" for whatever is still unrevealed by then.
-_UNKNOWN_CARD_TOKEN = "\x00UNKNOWN#{}\x00"
-_UNKNOWN_CARD_RE = re.compile(r"\x00UNKNOWN#(\d+)\x00")
-
-
 def _card_name(entity: Entity, card_db: Any) -> str:
+    # Deliberately *not* resolved retroactively once the card is later
+    # revealed: a line built at this point in the replay must reflect only
+    # what was actually knowable then. A later mention of the same entity
+    # (e.g. once the opponent actually plays it) calls this again at that
+    # later point and correctly shows the real name then -- there's no
+    # need, and it would be actively wrong for analysis, to rewrite this
+    # earlier line with knowledge from the future.
     if not entity.card_id:
-        return _UNKNOWN_CARD_TOKEN.format(entity.id)
+        return "Unbekannte Karte"
     card = card_db.get(entity.card_id)
     return str(card.name) if card else entity.card_id
 
@@ -993,39 +989,6 @@ def _insert_opening_draws(turns: list[Turn]) -> None:
         current.opening_draws = _opening_draw_lines(previous.end.hand, current.start.hand)
 
 
-def _resolve_unknown_card_names(turns: list[Turn], game: Game, card_db: Any) -> None:
-    """Replace every `_UNKNOWN_CARD_TOKEN` placeholder with the real card
-    name if the game revealed that entity's identity by the end of the
-    match (e.g. the opponent played a card that was generated hidden), or
-    with a plain "Unbekannte Karte" if it never did."""
-
-    def resolve_one(match: re.Match[str]) -> str:
-        entity = game.find_entity_by_id(int(match.group(1)))
-        if entity is not None and entity.card_id:
-            card = card_db.get(entity.card_id)
-            return str(card.name) if card else entity.card_id
-        return "Unbekannte Karte"
-
-    def resolve(text: str) -> str:
-        return _UNKNOWN_CARD_RE.sub(resolve_one, text)
-
-    def resolve_hand(hand: HandState) -> None:
-        hand.own_cards = [resolve(name) for name in hand.own_cards]
-
-    def resolve_board(board: BoardState) -> None:
-        for minion in board.own + board.opponent:
-            minion.name = resolve(minion.name)
-
-    for turn in turns:
-        turn.opening_draws = [resolve(line) for line in turn.opening_draws]
-        for snapshot in (turn.start, turn.end):
-            resolve_hand(snapshot.hand)
-            resolve_board(snapshot.board)
-        for action in turn.actions:
-            action.headline = resolve(action.headline)
-            action.effects = [resolve(effect) for effect in action.effects]
-
-
 def parse_log(path: Path) -> ParsedGame:
     parser = LogParser()
     with path.open() as f:
@@ -1048,7 +1011,6 @@ def parse_log(path: Path) -> ParsedGame:
     mulligan = _extract_mulligan(packet_tree, game, me)
     _insert_opening_draws(builder.turns)
     _insert_discover_actions(builder.turns, _extract_discoveries(packet_tree, game, card_db, me))
-    _resolve_unknown_card_names(builder.turns, game, card_db)
 
     return ParsedGame(
         own_class=_class_name(me, card_db),
