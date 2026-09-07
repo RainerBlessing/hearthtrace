@@ -1,16 +1,22 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from hearthstone.cardxml import load as load_cards
 from hearthstone.entities import Card, Game, Player
-from hearthstone.enums import ChoiceType, GameTag, Zone
+from hearthstone.enums import CardType, ChoiceType, GameTag, Zone
 from hslog import packets as hslog_packets
 
 from hs_tracker.parser import (
     Action,
     NoGameFoundError,
     _deck_status,
+    _diff_effects,
     _extract_discoveries,
+    _extract_mulligan,
+    _InstanceNamer,
+    _snapshot_entities,
+    _target_suffix,
     parse_log,
 )
 
@@ -35,6 +41,74 @@ def _register_card(
     card.tag_change(GameTag.CONTROLLER, controller.player_id)
     game.register_entity(card)
     return card
+
+
+def test_diff_effects_names_a_transform_by_pre_and_post_identity() -> None:
+    # Hex/Polymorph-style effects keep the same entity id but swap its
+    # card id -- the generic stat-diff would otherwise report this as an
+    # ordinary "Void Terror: 5/3 -> 1/1" line, losing which minion was
+    # actually targeted (it now displays as "Frog").
+    game, _friendly, opponent = _make_game_with_players()
+    target = _register_card(
+        game, entity_id=50, card_id="hexfrog", controller=opponent, zone=Zone.PLAY
+    )
+    target.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    target.tag_change(GameTag.ATK, 1)
+    target.tag_change(GameTag.HEALTH, 1)
+    before = {50: (Zone.PLAY, 5, 3, 0, "CORE_EX1_304")}
+    after = _snapshot_entities(game)
+
+    card_db, _ = load_cards()
+    namer = _InstanceNamer(card_db)
+    lines = _diff_effects(game, namer, _friendly, before, after)
+
+    assert lines == ["Void Terror #1 transformiert zu Frog #1 (1/1, kann angreifen)"]
+
+
+def test_target_suffix_names_target_by_pre_block_identity() -> None:
+    # The play/power headline's target must be named by what was actually
+    # selected (Void Terror), not what it becomes by the time the headline
+    # is built (Frog) -- otherwise "Hex -> Ziel: Frog" is nonsensical.
+    game, _friendly, opponent = _make_game_with_players()
+    target = _register_card(
+        game, entity_id=50, card_id="hexfrog", controller=opponent, zone=Zone.PLAY
+    )
+    target.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    target.tag_change(GameTag.ATK, 1)
+    target.tag_change(GameTag.HEALTH, 1)
+    before: dict[int, tuple] = {50: (Zone.PLAY, 5, 3, 0, "CORE_EX1_304")}
+
+    card_db, _ = load_cards()
+    namer = _InstanceNamer(card_db)
+    block = SimpleNamespace(target=50)
+    suffix = _target_suffix(block, game, namer, _friendly, before)
+
+    assert suffix == " → Ziel: Void Terror #1"
+
+
+def test_extract_mulligan_excludes_the_coin() -> None:
+    # A going-second player's mulligan `Choices.choices` includes The Coin
+    # (it's already sitting in their opening hand) -- confirmed structurally
+    # in the real fixture for the opponent (who goes second there). The
+    # Coin was never a real mulligan option and must never appear in either
+    # `kept` or `returned`, regardless of which raw list it ends up in.
+    game, friendly, _opponent = _make_game_with_players()
+    _register_card(game, entity_id=10, card_id="CS2_022", controller=friendly)  # Polymorph
+    _register_card(game, entity_id=11, card_id="GAME_005", controller=friendly)  # The Coin
+
+    choice = hslog_packets.Choices(
+        ts=None, entity=friendly.id, id=1, tasklist=None, type=ChoiceType.MULLIGAN, min=0, max=1
+    )
+    choice.choices = [10, 11]
+    chosen_entities = hslog_packets.ChosenEntities(ts=None, entity=friendly.id, id=1)
+    chosen_entities.choices = [10, 11]  # the Coin tags along in "chosen" too
+    packet_tree = [choice, chosen_entities]
+
+    mulligan = _extract_mulligan(packet_tree, game, friendly)
+
+    assert mulligan is not None
+    assert mulligan.kept == ["CS2_022"]
+    assert mulligan.returned == []
 
 
 def test_extract_discoveries_finds_friendly_general_choice() -> None:
@@ -137,6 +211,24 @@ def test_parse_log_records_play_action_with_target_mana_and_battlecry_effect() -
     assert play.effects == ["Dein Held: 30 → 29"]
 
 
+def test_parse_log_attributes_generated_cards_to_their_source() -> None:
+    # Turn 7: Ritual of Power's effect adds two Breezling cards directly to
+    # hand (never drawn from the deck) -- they must be attributed to their
+    # source, not silently appear in the next hand snapshot as if from
+    # nowhere. Turn 11: Witch's Apprentice's battlecry does the same for
+    # Molten Blast.
+    game = parse_log(FIXTURE)
+    turn7 = next(t for t in game.turns if t.number == 7)
+    turn11 = next(t for t in game.turns if t.number == 11)
+
+    ritual = next(a for a in turn7.actions if "Ritual of Power gespielt" in a.headline)
+    apprentice = next(a for a in turn11.actions if "Witch's Apprentice #1 gespielt" in a.headline)
+
+    assert "Ritual of Power → erzeugt Breezling #1" in ritual.effects
+    assert "Ritual of Power → erzeugt Breezling #2" in ritual.effects
+    assert "Witch's Apprentice #1 → erzeugt Molten Blast" in apprentice.effects
+
+
 def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
     # Turn 4: the opponent's Elven Archer attacks the friendly hero. A
     # hero-target attack is folded into a single line (no separate result
@@ -152,17 +244,22 @@ def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
     assert attack.effects == []
 
 
-def test_parse_log_infers_draw_action_from_hand_delta() -> None:
+def test_parse_log_infers_opening_draw_from_hand_delta_not_as_an_action() -> None:
     # Nothing else happens between the end of one turn and the ready state
     # of the next besides that turn's own draw -- the friendly player's
     # draw is shown by name (always known); the opponent's only as a
-    # generic draw notice (their identity is hidden information).
+    # generic draw notice (their identity is hidden information). It's
+    # already reflected in `start.hand`, so it must not also appear as a
+    # numbered action (that would misrepresent already-known context as a
+    # decision made during the turn).
     game = parse_log(FIXTURE)
     turn2 = next(t for t in game.turns if t.number == 2)
     turn3 = next(t for t in game.turns if t.number == 3)
 
-    assert turn2.actions[0].headline == "Gegner: zieht eine Karte"
-    assert turn3.actions[0].headline == "Du: gezogen — Wailing Vapor"
+    assert turn2.opening_draws == ["Gegner zieht eine Karte"]
+    assert turn3.opening_draws == ["Wailing Vapor gezogen"]
+    assert all("gezogen" not in a.headline and "zieht" not in a.headline for a in turn2.actions)
+    assert all("gezogen" not in a.headline and "zieht" not in a.headline for a in turn3.actions)
 
 
 def test_parse_log_numbers_identical_minions_to_tell_them_apart() -> None:
@@ -209,13 +306,21 @@ def test_parse_log_board_snapshot_includes_taunt_keyword() -> None:
 
 def test_parse_log_extracts_mulligan_choice() -> None:
     # Real mulligan from the fixture (Friendly#1000, entity id 2): offered
-    # Skywall Sentinel/Lightning Bolt/Envoy of the End, sent back Skywall
-    # Sentinel (SendChoices m_chosenEntities=[15]), kept the other two.
+    # Skywall Sentinel/Lightning Bolt/Envoy of the End; SendChoices
+    # m_chosenEntities=[15] (Skywall Sentinel) is the entity *kept* -- proven
+    # by independently tracing each entity's fate: id 15 (Skywall Sentinel)
+    # reaches Zone.GRAVEYARD (played from the opening hand, matching turn
+    # 1's actual starting hand), while id 20 (Lightning Bolt, *not* chosen)
+    # stays in Zone.DECK all game (never drawn again -- consistent with
+    # having been sent back). "Chosen" therefore means "kept", not "sent
+    # back to the deck", despite the mulligan UI's card-clicking gesture
+    # suggesting the opposite.
     game = parse_log(FIXTURE)
 
     assert game.mulligan is not None
-    assert game.mulligan.kept == ["CORE_EX1_238", "CATA_722"]
-    assert game.mulligan.returned == ["CATA_565"]
+    assert game.mulligan.kept == ["CATA_565"]
+    assert game.mulligan.returned == ["CORE_EX1_238", "CATA_722"]
+    assert "Skywall Sentinel" in game.turns[0].start.hand.own_cards
 
 
 def test_parse_log_extracts_not_in_deck_card_ids() -> None:

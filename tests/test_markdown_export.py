@@ -23,7 +23,7 @@ def _snapshot(
     board: BoardState | None = None,
 ) -> TurnSnapshot:
     return TurnSnapshot(
-        mana=mana or ManaState(available=1, maximum=1, overload_pending=0),
+        mana=mana or ManaState(available=1, maximum=1, locked=0, overload_pending=0),
         life=life or LifeState(own_health=30, own_armor=0, opponent_health=30, opponent_armor=0),
         hand=hand or HandState(own_cards=[], opponent_count=0),
         board=board or BoardState(own=[], opponent=[]),
@@ -34,6 +34,7 @@ def _turn(
     *,
     number: int = 1,
     player_name: str = "Du",
+    opening_draws: list[str] | None = None,
     start: TurnSnapshot | None = None,
     actions: list[Action] | None = None,
     end: TurnSnapshot | None = None,
@@ -41,6 +42,7 @@ def _turn(
     return Turn(
         number=number,
         player_name=player_name,
+        opening_draws=opening_draws or [],
         start=start or _snapshot(),
         actions=actions or [],
         end=end or _snapshot(),
@@ -208,7 +210,7 @@ def test_render_match_summary_includes_mana_life_hand_and_board_snapshot() -> No
             _turn(
                 number=7,
                 start=_snapshot(
-                    mana=ManaState(available=4, maximum=5, overload_pending=1),
+                    mana=ManaState(available=4, maximum=5, locked=2, overload_pending=1),
                     life=LifeState(
                         own_health=27, own_armor=2, opponent_health=24, opponent_armor=0
                     ),
@@ -228,7 +230,7 @@ def test_render_match_summary_includes_mana_life_hand_and_board_snapshot() -> No
 
     markdown = render_match_summary(game)
 
-    assert "Mana: 4/5 | Überladen: 1" in markdown
+    assert "Mana: 4/5 | Gesperrt: 2 | Überladen: 1" in markdown
     assert "Heldenleben: Du 27 | Gegner 24" in markdown
     assert "Rüstung: Du 2 | Gegner 0" in markdown
     assert "- Hex" in markdown
@@ -274,6 +276,52 @@ def test_render_match_summary_omits_hand_and_armor_from_end_snapshot() -> None:
     assert "Hand (" not in end_section
     assert "Rüstung" not in end_section
     assert "Heldenleben: Du 28 | Gegner 25" in end_section
+
+
+def test_render_match_summary_shows_opening_draw_before_start_not_as_an_action() -> None:
+    # The turn's own automatic draw is already baked into `start.hand` --
+    # showing it again as action #1 would misrepresent it as a decision
+    # made *after* the point `start` describes, when it's already-known
+    # context by then.
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[
+            _turn(
+                number=3,
+                opening_draws=["Fireball gezogen"],
+                actions=[Action(headline="Du: Frostbolt gespielt (Mana: 2 → 0)")],
+            )
+        ],
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Zugbeginn: Fireball gezogen" in markdown
+    turn_section = markdown.split("## Zug 3")[1]
+    assert turn_section.index("Zugbeginn:") < turn_section.index("### Start")
+    assert "1. Fireball gezogen" not in markdown
+    assert "1. Du: Frostbolt gespielt" in markdown
+
+
+def test_render_match_summary_omits_opening_draw_line_when_none() -> None:
+    game = ParsedGame(
+        own_class="MAGE",
+        opponent_class="WARRIOR",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[_turn(number=1, opening_draws=[])],
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Zugbeginn:" not in markdown
 
 
 def test_render_match_summary_includes_actions_with_indented_effects() -> None:

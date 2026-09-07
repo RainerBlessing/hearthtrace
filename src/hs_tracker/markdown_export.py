@@ -55,7 +55,8 @@ def _render_mana_and_life(snapshot: TurnSnapshot, *, include_armor: bool) -> lis
     mana = snapshot.mana
     life = snapshot.life
     lines = [
-        f"Mana: {mana.available}/{mana.maximum} | Überladen: {mana.overload_pending}",
+        f"Mana: {mana.available}/{mana.maximum} | Gesperrt: {mana.locked}"
+        f" | Überladen: {mana.overload_pending}",
         f"Heldenleben: Du {life.own_health} | Gegner {life.opponent_health}",
     ]
     if include_armor:
@@ -104,10 +105,17 @@ def _render_actions(turn: Turn) -> list[str]:
     return lines
 
 
+def _render_opening_draws(turn: Turn) -> list[str]:
+    if not turn.opening_draws:
+        return []
+    return [f"Zugbeginn: {', '.join(turn.opening_draws)}", ""]
+
+
 def _render_turn(turn: Turn) -> list[str]:
     return [
         f"## Zug {turn.number} – {turn.player_name}",
         "",
+        *_render_opening_draws(turn),
         *_render_start_snapshot(turn.start),
         "",
         *_render_actions(turn),

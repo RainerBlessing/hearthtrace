@@ -61,7 +61,12 @@ class MulliganChoice:
 class ManaState:
     available: int
     maximum: int
-    overload_pending: int  # locks *next* turn; already-locked mana is baked into `available`
+    # Crystals locked *this* turn (from overload committed on a previous
+    # turn) -- already subtracted out of `available`, but shown separately
+    # too since "why is available lower than maximum" is decision-relevant
+    # on its own, especially for an Overload class like Shaman.
+    locked: int
+    overload_pending: int  # newly committed this turn/action; will lock *next* turn
 
 
 @dataclass
@@ -118,6 +123,12 @@ class Action:
 class Turn:
     number: int
     player_name: str  # "Du" | "Gegner"
+    # The turn's own automatic draw (nothing else happens between the
+    # previous turn's Ende and this one's Start) -- shown separately from
+    # `actions` since `start` already reflects the post-draw hand; listing
+    # it again as action #1 would make it look like a decision that hadn't
+    # happened yet at the point `start` describes.
+    opening_draws: list[str]
     start: TurnSnapshot
     actions: list[Action]
     end: TurnSnapshot
@@ -213,7 +224,10 @@ def _mana_state(player: Player) -> ManaState:
     locked = player.tags.get(GameTag.OVERLOAD_LOCKED, 0)
     overload_pending = player.tags.get(GameTag.OVERLOAD, 0)
     return ManaState(
-        available=resources - used - locked, maximum=resources, overload_pending=overload_pending
+        available=resources - used - locked,
+        maximum=resources,
+        locked=locked,
+        overload_pending=overload_pending,
     )
 
 
@@ -288,13 +302,16 @@ def _turn_snapshot(
 
 # --- Action log (before/after state diffing) -------------------------------
 
-# entity_id -> (zone, attack, effective_health, armor) for every real card
-# entity (not the Game/Player objects themselves), captured just before and
-# just after a top-level block runs. attack/health/armor default to 0 for
-# entities that don't carry those tags (spells, weapons, ...) -- harmless,
-# since a 0-vs-0 comparison never produces a spurious diff line.
-_EntitySnapshot = dict[int, tuple[Zone, int, int, int]]
-_NOT_TRACKED: tuple[Zone, int, int, int] = (Zone.INVALID, 0, 0, 0)
+# entity_id -> (zone, attack, effective_health, armor, card_id) for every
+# real card entity (not the Game/Player objects themselves), captured just
+# before and just after a top-level block runs. attack/health/armor default
+# to 0 for entities that don't carry those tags (spells, weapons, ...) --
+# harmless, since a 0-vs-0 comparison never produces a spurious diff line.
+# card_id is captured too (not just read live at diff time) so a target's
+# *pre-transform* identity can still be named after a Hex/Polymorph-style
+# effect has already replaced it with a different card.
+_EntitySnapshot = dict[int, tuple[Zone, int, int, int, str]]
+_NOT_TRACKED: tuple[Zone, int, int, int, str] = (Zone.INVALID, 0, 0, 0, "")
 
 
 def _snapshot_entities(game: Game) -> _EntitySnapshot:
@@ -306,7 +323,7 @@ def _snapshot_entities(game: Game) -> _EntitySnapshot:
         damage = entity.tags.get(GameTag.DAMAGE, 0)
         attack = entity.tags.get(GameTag.ATK, 0)
         armor = entity.tags.get(GameTag.ARMOR, 0)
-        snapshot[entity.id] = (entity.zone, attack, health - damage, armor)
+        snapshot[entity.id] = (entity.zone, attack, health - damage, armor, entity.card_id or "")
     return snapshot
 
 
@@ -320,17 +337,31 @@ class _InstanceNamer:
 
     def __init__(self, card_db: Any) -> None:
         self._card_db = card_db
-        self._numbers: dict[int, int] = {}
+        # Keyed by (entity id, card name) rather than just entity id: a
+        # transformed minion (Hex, Polymorph, ...) keeps its entity id but
+        # becomes a different card, and should be numbered among *that*
+        # card's copies, not carry over its pre-transform number.
+        self._numbers: dict[tuple[int, str], int] = {}
         self._next_number: dict[str, int] = {}
 
-    def minion_name(self, entity: Entity) -> str:
-        base = _card_name(entity, self._card_db)
-        number = self._numbers.get(entity.id)
+    def _numbered(self, entity_id: int, base: str) -> str:
+        key = (entity_id, base)
+        number = self._numbers.get(key)
         if number is None:
             number = self._next_number.get(base, 0) + 1
             self._next_number[base] = number
-            self._numbers[entity.id] = number
+            self._numbers[key] = number
         return f"{base} #{number}"
+
+    def minion_name(self, entity: Entity) -> str:
+        return self._numbered(entity.id, _card_name(entity, self._card_db))
+
+    def minion_name_for_card_id(self, entity_id: int, card_id: str) -> str:
+        """Names a minion by a *specific* card id rather than the entity's
+        current one -- for naming a transform target by what it was."""
+        card = self._card_db.get(card_id) if card_id else None
+        base = str(card.name) if card else (card_id or "Unbekannte Karte")
+        return self._numbered(entity_id, base)
 
     def display_name(self, entity: Entity, friendly_player: Player) -> str:
         if entity.type == CardType.HERO:
@@ -359,11 +390,11 @@ def _zone_transition_line(
 def _stat_diff_lines(
     is_hero: bool,
     name: str,
-    previous: tuple[Zone, int, int, int],
-    current: tuple[Zone, int, int, int],
+    previous: tuple[Zone, int, int, int, str],
+    current: tuple[Zone, int, int, int, str],
 ) -> list[str]:
-    _zone_before, attack_before, health_before, armor_before = previous
-    _zone_after, attack_after, health_after, armor_after = current
+    _zone_before, attack_before, health_before, armor_before, _card_id_before = previous
+    _zone_after, attack_after, health_after, armor_after, _card_id_after = current
     lines = []
     if health_after != health_before or (not is_hero and attack_after != attack_before):
         if is_hero:
@@ -379,8 +410,8 @@ def _entity_diff_lines(
     entity_type: CardType,
     name: str,
     is_friendly_owner: bool,
-    previous: tuple[Zone, int, int, int] | None,
-    current: tuple[Zone, int, int, int],
+    previous: tuple[Zone, int, int, int, str] | None,
+    current: tuple[Zone, int, int, int, str],
 ) -> list[str]:
     resolved_previous = previous or _NOT_TRACKED
     transition = _zone_transition_line(
@@ -391,6 +422,63 @@ def _entity_diff_lines(
     if previous is None:
         return []
     return _stat_diff_lines(entity_type == CardType.HERO, name, previous, current)
+
+
+def _format_minion_stats(entity: Entity) -> str:
+    attack = entity.tags.get(GameTag.ATK, 0)
+    health = entity.tags.get(GameTag.HEALTH, 0) - entity.tags.get(GameTag.DAMAGE, 0)
+    keywords = _minion_keywords(entity)
+    if keywords:
+        return f"{attack}/{health}, {', '.join(keywords)}"
+    return f"{attack}/{health}"
+
+
+def _transform_line(
+    entity: Entity,
+    namer: _InstanceNamer,
+    friendly_player: Player,
+    previous: tuple[Zone, int, int, int, str] | None,
+    current: tuple[Zone, int, int, int, str],
+) -> str | None:
+    """A minion that changes card id while staying on the board (Hex,
+    Polymorph, ...) keeps the same entity id, so the generic diff would
+    otherwise just report it as an ordinary stat change under its *new*
+    name -- losing which minion was actually targeted. Named explicitly
+    instead: "{old} transformiert zu {new} (atk/hp, keywords)"."""
+    if entity.type != CardType.MINION or previous is None:
+        return None
+    zone_before, _attack_before, _health_before, _armor_before, card_id_before = previous
+    zone_after, _attack_after, _health_after, _armor_after, card_id_after = current
+    if zone_before != Zone.PLAY or zone_after != Zone.PLAY or card_id_before == card_id_after:
+        return None
+    old_name = namer.minion_name_for_card_id(entity.id, card_id_before)
+    new_name = namer.display_name(entity, friendly_player)
+    return f"{old_name} transformiert zu {new_name} ({_format_minion_stats(entity)})"
+
+
+def _generated_into_hand_line(
+    game: Game,
+    entity: Entity,
+    namer: _InstanceNamer,
+    friendly_player: Player,
+    previous: tuple[Zone, int, int, int, str] | None,
+    current: tuple[Zone, int, int, int, str],
+) -> str | None:
+    """A card that appears directly in a hand without ever having been in
+    the deck (Discover excepted -- that's tracked separately) was added by
+    some effect, e.g. a Battlecry generating a random card. Silently
+    letting it just show up in the next hand snapshot would look like it
+    came from nowhere -- name its source when the game tells us
+    (`initial_creator`), otherwise say plainly that its origin is unknown
+    rather than pretending it was drawn."""
+    if previous is not None or current[0] != Zone.HAND:
+        return None
+    name = namer.display_name(entity, friendly_player)
+    creator_id = entity.initial_creator
+    creator = game.find_entity_by_id(creator_id) if creator_id else None
+    if creator is not None:
+        return f"{namer.display_name(creator, friendly_player)} → erzeugt {name}"
+    return f"{name} zur Hand hinzugefügt (Quelle unbekannt)"
 
 
 def _diff_effects(
@@ -408,8 +496,18 @@ def _diff_effects(
         entity = game.find_entity_by_id(entity_id)
         if entity is None:
             continue
-        name = namer.display_name(entity, friendly_player)
         previous = before.get(entity_id)
+        transform = _transform_line(entity, namer, friendly_player, previous, current)
+        if transform is not None:
+            lines.append(transform)
+            continue
+        generated = _generated_into_hand_line(
+            game, entity, namer, friendly_player, previous, current
+        )
+        if generated is not None:
+            lines.append(generated)
+            continue
+        name = namer.display_name(entity, friendly_player)
         is_friendly_owner = entity.controller is friendly_player
         lines += _entity_diff_lines(entity.type, name, is_friendly_owner, previous, current)
     return lines
@@ -453,13 +551,23 @@ def _attack_headline(
     return f"{player_label}: {attacker_name} → {defender_name}", frozenset()
 
 
-def _target_suffix(block: Any, game: Game, namer: _InstanceNamer, friendly_player: Player) -> str:
+def _target_suffix(
+    block: Any, game: Game, namer: _InstanceNamer, friendly_player: Player, before: _EntitySnapshot
+) -> str:
+    """Names the target as it was *before* this block ran, not what it may
+    have become by the time the headline is built (e.g. a Hex target must
+    be named by what was actually chosen, not the Frog it ends up as)."""
     if not block.target:
         return ""
     target = game.find_entity_by_id(block.target)
     if target is None:
         return ""
-    return f" → Ziel: {namer.display_name(target, friendly_player)}"
+    card_id_before = before.get(block.target, _NOT_TRACKED)[4]
+    if target.type == CardType.MINION and card_id_before:
+        name = namer.minion_name_for_card_id(block.target, card_id_before)
+    else:
+        name = namer.display_name(target, friendly_player)
+    return f" → Ziel: {name}"
 
 
 def _build_action(
@@ -492,7 +600,7 @@ def _build_action(
     else:
         name = namer.display_name(entity, friendly_player) if entity is not None else "?"
         verb = _BLOCK_VERBS[block.type]
-        target_suffix = _target_suffix(block, game, namer, friendly_player)
+        target_suffix = _target_suffix(block, game, namer, friendly_player, before)
         mana_suffix = _mana_headline_suffix(mana_before, mana_after)
         headline = f"{player_label}: {name} {verb}{target_suffix}{mana_suffix}"
         # The played card's own hand->play transition is already conveyed
@@ -568,32 +676,64 @@ class _TurnBuilder:
         self._current = Turn(
             number=turn_number,
             player_name=_player_label(active, me),
+            opening_draws=[],
             start=_turn_snapshot(me, opponent, active, self._card_db, self._namer),
             actions=[],
             end=_turn_snapshot(me, opponent, active, self._card_db, self._namer),
         )
 
-    def before_block(self, block: Any, game: Game) -> tuple[_EntitySnapshot, int | None] | None:
+    def before_block(
+        self, block: Any, game: Game
+    ) -> tuple[_EntitySnapshot, int | None, int | None] | None:
         if block.type not in _ACTION_BLOCK_TYPES or self._current is None:
             return None
         controller = self._block_controller(block, game)
         mana_before = _mana_state(controller).available if controller is not None else None
-        return _snapshot_entities(game), mana_before
+        return _snapshot_entities(game), mana_before, self._card_cost(block, game)
 
     def after_block(
-        self, block: Any, game: Game, before: tuple[_EntitySnapshot, int | None]
+        self, block: Any, game: Game, before: tuple[_EntitySnapshot, int | None, int | None]
     ) -> None:
         if self._current is None:
             return
         me, _opponent = self._players(game)
-        before_entities, mana_before = before
+        before_entities, mana_before, card_cost = before
         after_entities = _snapshot_entities(game)
-        controller = self._block_controller(block, game)
-        mana_after = _mana_state(controller).available if controller is not None else None
+        mana_after = self._mana_after(block, game, mana_before, card_cost)
         action = _build_action(
             block, game, self._namer, me, before_entities, after_entities, mana_before, mana_after
         )
         self._current.actions.append(action)
+
+    @staticmethod
+    def _card_cost(block: Any, game: Game) -> int | None:
+        # Read live, right before the block runs. Only meaningful for an
+        # entity we can actually see the cost of at that point -- a hidden
+        # opponent hand card's COST tag isn't populated yet (it's revealed
+        # *during* this same block), so this legitimately returns None for
+        # those; the live RESOURCES_USED diff below still handles them.
+        if block.type not in (BlockType.PLAY, BlockType.POWER):
+            return None
+        entity = game.find_entity_by_id(block.entity)
+        if entity is None or not entity.revealed:
+            return None
+        return entity.tags.get(GameTag.COST, 0)
+
+    def _mana_after(
+        self, block: Any, game: Game, mana_before: int | None, card_cost: int | None
+    ) -> int | None:
+        controller = self._block_controller(block, game)
+        live_after = _mana_state(controller).available if controller is not None else None
+        if live_after is not None and live_after >= 0:
+            return live_after
+        # The live-diffed RESOURCES_USED went negative -- impossible in a
+        # real game (observed for a cost-discounted card in a real match,
+        # e.g. Ultraxion). Fall back to the card's own live cost, which
+        # reflects any discount already applied, instead of ever showing
+        # negative mana.
+        if card_cost is not None and mana_before is not None:
+            return max(0, mana_before - card_cost)
+        return live_after
 
     @staticmethod
     def _block_controller(block: Any, game: Game) -> Player | None:
@@ -693,8 +833,19 @@ def _is_friendly_choice(
     return game.find_entity_by_id(entity_id) is friendly_player
 
 
+# The Coin is included in a going-second player's mulligan `Choices.choices`
+# offer list (it's already sitting in their opening hand at that point), but
+# it was never a real mulligan option -- it must never appear in either
+# `kept` or `returned`.
+_COIN_CARD_ID = "GAME_005"
+
+
 def _resolve_card_ids(game: Game, entity_ids: list[int]) -> list[str]:
     return [cid for cid in (_entity_card_id(game, eid) for eid in entity_ids) if cid]
+
+
+def _resolve_card_ids_excluding_coin(game: Game, entity_ids: list[int]) -> list[str]:
+    return [cid for cid in _resolve_card_ids(game, entity_ids) if cid != _COIN_CARD_ID]
 
 
 def _resolve_current_names(game: Game, card_db: Any, entity_ids: list[int]) -> list[str]:
@@ -710,9 +861,14 @@ def _extract_mulligan(
 ) -> MulliganChoice | None:
     """Find the friendly player's mulligan: the `Choices` packet of type
     MULLIGAN whose player is `friendly_player` gives the offered hand; the
-    `ChosenEntities` packet sharing its choice id gives the cards actually
-    sent back (Hearthstone's mulligan choice is "which cards to replace",
-    not "which to keep")."""
+    `ChosenEntities`/`SendChoices` packet sharing its choice id gives the
+    cards the player actually confirmed keeping -- verified against a real
+    match (commit history): the entity in `chosen` ended the match having
+    been played from the opening hand (proven by reaching Zone.GRAVEYARD
+    with no earlier draw), while an *unchosen* offered entity was never
+    drawn again all match (proven by still sitting in Zone.DECK at the
+    end) -- i.e. `chosen` is "kept", not "sent back", the opposite of what
+    the mulligan UI's card-clicking gesture might suggest."""
     choices, chosen = _collect_choice_packets(packet_tree, game)
     mulligan_choice = next(
         (
@@ -726,11 +882,11 @@ def _extract_mulligan(
         return None
 
     chosen_entities = next((c for c in chosen if c.id == mulligan_choice.id), None)
-    returned_ids = chosen_entities.choices if chosen_entities else []
-    kept_ids = [entity_id for entity_id in mulligan_choice.choices if entity_id not in returned_ids]
+    kept_ids = chosen_entities.choices if chosen_entities else []
+    returned_ids = [entity_id for entity_id in mulligan_choice.choices if entity_id not in kept_ids]
 
-    kept = _resolve_card_ids(game, kept_ids)
-    returned = _resolve_card_ids(game, returned_ids)
+    kept = _resolve_card_ids_excluding_coin(game, kept_ids)
+    returned = _resolve_card_ids_excluding_coin(game, returned_ids)
     return MulliganChoice(kept=kept, returned=returned)
 
 
@@ -789,27 +945,30 @@ def _deck_status(me: Player) -> tuple[list[str], list[str]]:
     return remaining, not_in_deck
 
 
-def _draw_actions(previous_hand: HandState, current_hand: HandState) -> list[Action]:
+def _opening_draw_lines(previous_hand: HandState, current_hand: HandState) -> list[str]:
     """Cards newly present in `current_hand` compared to `previous_hand`.
 
     Nothing else happens between the end of one turn and the start of the
     next besides that turn's own draw, so a hand-size/contents delta
     between two adjacent snapshots is, in practice, exactly what was drawn
     -- friendly draws by name (always known), opponent draws as a count
-    (their identity is hidden information until played or revealed)."""
-    actions = []
+    (their identity is hidden information until played or revealed).
+    Rendered above `### Start`, not as an "action": `current_hand` (i.e.
+    `start.hand`) already reflects the post-draw hand, so the draw is
+    already-known context for that turn's decisions, not one of them."""
+    lines = []
     newly_drawn = Counter(current_hand.own_cards) - Counter(previous_hand.own_cards)
     for card_name in sorted(newly_drawn.elements()):
-        actions.append(Action(headline=f"Du: gezogen — {card_name}"))
+        lines.append(f"{card_name} gezogen")
     opponent_drawn = current_hand.opponent_count - previous_hand.opponent_count
     for _ in range(max(0, opponent_drawn)):
-        actions.append(Action(headline="Gegner: zieht eine Karte"))
-    return actions
+        lines.append("Gegner zieht eine Karte")
+    return lines
 
 
-def _insert_draw_actions(turns: list[Turn]) -> None:
+def _insert_opening_draws(turns: list[Turn]) -> None:
     for previous, current in zip(turns, turns[1:], strict=False):
-        current.actions = _draw_actions(previous.end.hand, current.start.hand) + current.actions
+        current.opening_draws = _opening_draw_lines(previous.end.hand, current.start.hand)
 
 
 def parse_log(path: Path) -> ParsedGame:
@@ -832,7 +991,7 @@ def parse_log(path: Path) -> ParsedGame:
     me, opponent = _friendly_and_opponent(game, friendly_id)
     _remaining, not_in_deck = _deck_status(me)
     mulligan = _extract_mulligan(packet_tree, game, me)
-    _insert_draw_actions(builder.turns)
+    _insert_opening_draws(builder.turns)
     _insert_discover_actions(builder.turns, _extract_discoveries(packet_tree, game, card_db, me))
 
     return ParsedGame(
