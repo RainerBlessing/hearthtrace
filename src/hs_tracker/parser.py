@@ -307,7 +307,7 @@ def _card_name(entity: Entity, card_db: Any) -> str:
     if not entity.card_id:
         return "Unbekannte Karte"
     card = card_db.get(entity.card_id)
-    return str(card.name) if card else entity.card_id
+    return card.name if card else entity.card_id
 
 
 def _hand_state(me: Player, opponent: Player, card_db: Any) -> HandState:
@@ -445,7 +445,7 @@ class _InstanceNamer:
         """Names a minion by a *specific* card id rather than the entity's
         current one -- for naming a transform target by what it was."""
         card = self._card_db.get(card_id) if card_id else None
-        base = str(card.name) if card else (card_id or "Unbekannte Karte")
+        base = card.name if card else (card_id or "Unbekannte Karte")
         return self._numbered(entity_id, base)
 
     def display_name(self, entity: Entity, friendly_player: Player) -> str:
