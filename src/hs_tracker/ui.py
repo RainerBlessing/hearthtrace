@@ -451,6 +451,16 @@ class TrackerWindow(Adw.ApplicationWindow):
         for index, action in enumerate(turn.actions, start=1):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             row.set_valign(Gtk.Align.START)
+            # Explicitly override this row's own expand flag rather than
+            # leaving it computed: without this, the connector's own
+            # vexpand below would propagate all the way up through row
+            # into `_replay_content_box`, which is exactly the "stretches
+            # across the whole page" bug fixed previously. Setting it here
+            # stops that propagation at the row boundary, so vexpand can
+            # still do its actual job -- filling *this row's own* height,
+            # which is however tall its `content` column naturally is --
+            # without also inflating the page.
+            row.set_vexpand(False)
 
             number_label = Gtk.Label(label=str(index))
             number_label.add_css_class("heading")
@@ -461,31 +471,29 @@ class TrackerWindow(Adw.ApplicationWindow):
             number_frame = Gtk.Frame()
             number_frame.set_child(number_label)
             number_frame.set_halign(Gtk.Align.CENTER)
+            number_frame.set_valign(Gtk.Align.START)
 
-            # A thin connector below every badge but the last, so the
-            # numbered list reads as one continuous sequence rather than
-            # separate unrelated rows -- a plain Gtk.Separator, already
-            # theme-consistent and subtle without any custom styling.
+            # A connector spanning down to the next badge, so the numbered
+            # list reads as one continuous sequence rather than separate
+            # unrelated rows -- its height follows the row's actual content
+            # height (vexpand, but scoped to this row only -- see above),
+            # not a fixed guess, so a multi-effect action's longer text
+            # doesn't leave the line stopping short of the next number.
             badge_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-            badge_column.set_valign(Gtk.Align.START)
+            badge_column.set_valign(Gtk.Align.FILL)
             badge_column.append(number_frame)
             if index < len(turn.actions):
-                # A short *fixed*-height tick, not `vexpand=True`: an
-                # expanding separator here previously stretched to fill
-                # whatever leftover vertical space the page had (a lot, on
-                # a tall/wide window with only a few actions), spreading
-                # the whole numbered list out like `justify-content:
-                # space-between` instead of a tight, connected sequence.
                 connector = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
                 # A vertical Box's child defaults to filling the column's
                 # full (perpendicular) width -- without an explicit narrow
-                # size and centered halign, this renders as a solid gray
+                # width and centered halign, this renders as a solid gray
                 # block as wide as the badge circle above it, not a thin
                 # connecting line.
-                connector.set_size_request(2, 20)
+                connector.set_size_request(2, -1)
                 connector.set_halign(Gtk.Align.CENTER)
-                connector.set_margin_top(2)
-                connector.set_margin_bottom(2)
+                connector.set_vexpand(True)
+                connector.set_margin_top(4)
+                connector.set_margin_bottom(4)
                 badge_column.append(connector)
 
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
