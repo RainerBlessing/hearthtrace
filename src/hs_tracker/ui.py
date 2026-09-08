@@ -13,6 +13,7 @@ from hearthstone.cardxml import load as load_cards  # noqa: E402
 from hs_tracker.config import Config  # noqa: E402
 from hs_tracker.deck_state import remaining_deck  # noqa: E402
 from hs_tracker.log_reader import find_latest_power_log  # noqa: E402
+from hs_tracker.log_setup import check_log_setup, disable_log_size_limit  # noqa: E402
 from hs_tracker.markdown_export import export_match_summary  # noqa: E402
 from hs_tracker.match_history import format_history_row, load_match_history  # noqa: E402
 from hs_tracker.parser import (  # noqa: E402
@@ -165,6 +166,63 @@ class TrackerWindow(Adw.ApplicationWindow):
         self.set_content(toolbar_view)
 
         GLib.timeout_add_seconds(2, self._poll)
+        # Deferred rather than shown right here: the window isn't presented
+        # yet at this point in construction (`app.py` calls `win.present()`
+        # only after this constructor returns), and `Adw.AlertDialog.present`
+        # needs a real, visible parent. `idle_add` runs this once the main
+        # loop is idle -- i.e. after `present()` has already happened.
+        GLib.idle_add(self._maybe_offer_log_size_limit_fix)
+
+    def _maybe_offer_log_size_limit_fix(self) -> bool:
+        # Only the 10MB size limit is ever offered a fix here -- the other
+        # two checks (whether Power.log is being written at all) require
+        # setting up `log.config` from scratch, which is a bigger one-time
+        # manual step (see the project's design doc) than this tracker can
+        # safely automate. If the size limit is already fine, say nothing:
+        # a dialog confirming "everything is fine" on every single startup
+        # would just be noise.
+        check = check_log_setup(self._config.logs_dir.parent)
+        if check.size_limit_disabled:
+            return GLib.SOURCE_REMOVE
+
+        def _mark(ok: bool) -> str:
+            return "✓" if ok else "✗"
+
+        dialog = Adw.AlertDialog(
+            heading="Hearthstone-Logging",
+            body=(
+                f"{_mark(check.power_log_enabled)} Power.log aktiviert\n"
+                f"{_mark(check.verbose_enabled)} Verbose Power-Logging aktiviert\n"
+                f"{_mark(check.size_limit_disabled)} 10-MB-Loglimit aktiv\n\n"
+                "Hearthstone schneidet Power.log bei 10MB ab und schreibt danach "
+                "gar nichts mehr hinein -- ein noch laufendes Match ist ab diesem "
+                "Punkt für keinen Log-Tracker mehr rekonstruierbar. "
+                "client.config wird vorher gesichert (client.config.bak). "
+                "Hearthstone muss danach neu gestartet werden, damit die Änderung "
+                "wirkt."
+            ),
+        )
+        dialog.add_response("later", "Später")
+        dialog.add_response("fix", "Loglimit deaktivieren")
+        dialog.set_response_appearance("fix", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("fix")
+        dialog.set_close_response("later")
+        dialog.connect("response", self._on_log_size_limit_response)
+        dialog.present(self)
+        return GLib.SOURCE_REMOVE
+
+    def _on_log_size_limit_response(self, _dialog: Adw.AlertDialog, response: str) -> None:
+        if response != "fix":
+            return
+        try:
+            disable_log_size_limit(self._config.logs_dir.parent)
+        except OSError as e:
+            error = Adw.AlertDialog(
+                heading="Fehler",
+                body=f"client.config konnte nicht geschrieben werden: {e}",
+            )
+            error.add_response("ok", "OK")
+            error.present(self)
 
     @staticmethod
     def _clamp(child: Gtk.Widget) -> Adw.Clamp:
