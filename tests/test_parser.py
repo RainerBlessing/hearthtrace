@@ -377,6 +377,37 @@ def test_parse_log_freezes_lethal_heros_health_against_a_post_mortem_tag_rewrite
     assert last_turn.end.life.opponent_health == -1
 
 
+def test_freeze_dead_hero_health_keeps_the_first_value_seen_not_the_latest() -> None:
+    # Code-review-caught regression in the fix above: `after_block` runs
+    # for *every* top-level block, and a hero that's already dead can
+    # still show up in a later block's fresh `_snapshot_entities` call --
+    # e.g. a separate deathrattle trigger, or a fatigue tick, later in the
+    # same turn. If that later snapshot were allowed to overwrite the
+    # frozen value, a HEALTH tag rewritten sometime between the two blocks
+    # (the exact kind of post-mortem bookkeeping this fix guards against)
+    # would silently corrupt it again. Freezing must be first-write-wins.
+    game, friendly, opponent = _make_game_with_players()
+    hero = _register_card(
+        game, entity_id=10, card_id="HERO_02", controller=opponent, zone=Zone.PLAY
+    )
+    hero.tag_change(GameTag.CARDTYPE, CardType.HERO)
+    opponent.tags[GameTag.HERO_ENTITY] = hero.id
+    card_db, _ = load_cards()
+    builder = _TurnBuilder(friendly.player_id, card_db)
+
+    # The moment of death: HEALTH is still the real, buffed value.
+    builder._freeze_dead_hero_health(  # noqa: SLF001
+        friendly, opponent, {hero.id: (Zone.GRAVEYARD, 0, -1, 0, "HERO_02")}
+    )
+    # A later block re-snapshots the same still-dead hero; its tags have
+    # since been rewritten for unrelated bookkeeping reasons.
+    builder._freeze_dead_hero_health(  # noqa: SLF001
+        friendly, opponent, {hero.id: (Zone.GRAVEYARD, 0, -11, 0, "HERO_02")}
+    )
+
+    assert builder._frozen_hero_health[hero.id] == -1  # noqa: SLF001
+
+
 def test_parse_log_handles_a_third_match_after_a_players_role_flips() -> None:
     # Real-match ground truth: this session log holds two matches, and the
     # same account went from player_id=2 in the first to player_id=1 in

@@ -284,7 +284,7 @@ def _mana_state(player: Player) -> ManaState:
     )
 
 
-def _hero_health(hero: Entity, frozen: "_EntitySnapshot | None") -> int:
+def _hero_health(hero: Entity, frozen: dict[int, int] | None) -> int:
     # A dead hero's own HEALTH tag can still change afterwards -- e.g. an
     # aura enchantment (Prince Renathal's +10 Health) attached to the hero
     # gets cleaned up as part of the same death processing, which
@@ -293,18 +293,21 @@ def _hero_health(hero: Entity, frozen: "_EntitySnapshot | None") -> int:
     # of `HEALTH - DAMAGE` at export time can't tell the difference and
     # would report a wrong, inflated-magnitude number (observed for real:
     # -11 instead of the true -1 at the moment of death). Once the hero is
-    # in the graveyard, trust the last snapshot taken *during* the replay
-    # (via `_TurnBuilder.after_block`, before any such trailing rewrite)
-    # instead of re-reading its tags now.
+    # in the graveyard, trust the value frozen the *first* time it was seen
+    # there (`_TurnBuilder._freeze_dead_hero_health`, called right after
+    # every top-level block) instead of re-reading its tags now -- a block
+    # that runs *later* in the same turn (a separate deathrattle trigger, a
+    # fatigue tick, ...) must not be allowed to overwrite it with an
+    # already-corrupted value.
     if hero.zone == Zone.GRAVEYARD and frozen is not None:
         cached = frozen.get(hero.id)
         if cached is not None:
-            return cached[2]
+            return cached
     return hero.tags.get(GameTag.HEALTH, 0) - hero.tags.get(GameTag.DAMAGE, 0)
 
 
 def _life_state(
-    me: Player, opponent: Player, frozen: "_EntitySnapshot | None" = None
+    me: Player, opponent: Player, frozen: dict[int, int] | None = None
 ) -> LifeState:
     my_hero, their_hero = me.hero, opponent.hero
     assert my_hero is not None and their_hero is not None
@@ -390,7 +393,7 @@ def _turn_snapshot(
     active: Player,
     card_db: Any,
     namer: "_InstanceNamer",
-    frozen: "_EntitySnapshot | None" = None,
+    frozen: dict[int, int] | None = None,
 ) -> TurnSnapshot:
     # Life/hand/board are always shown from the friendly player's own point
     # of view (Du/Gegner); mana is shown for whoever's turn it is, since
@@ -904,12 +907,12 @@ class _TurnBuilder:
         # blocks never pollutes the next tracked block's order.
         self._touch_order: list[int] | None = None
         self._touched_ids: set[int] = set()
-        # Entity health/damage as of the most recently completed top-level
-        # block -- kept around so a hero's *final* health can still be read
-        # correctly even if the game later rewrites its HEALTH tag for
-        # reasons that have nothing to do with the match result (see
-        # `_hero_health`). Updated on every `after_block` call.
-        self._last_entities: _EntitySnapshot = {}
+        # A hero's health (by entity id), frozen the *first* time that hero
+        # is seen dead -- not updated again after that, even if a later
+        # block in the same turn re-snapshots a since-corrupted HEALTH tag
+        # (see `_hero_health`). First-write-wins, since the correct value
+        # is only ever true right when the hero actually dies.
+        self._frozen_hero_health: dict[int, int] = {}
         self.turns: list[Turn] = []
 
     def _players(self, game: Game) -> tuple[Player, Player]:
@@ -929,7 +932,7 @@ class _TurnBuilder:
         if self._current is not None and self._active is not None:
             me, opponent = self._players(game)
             self._current.end = _turn_snapshot(
-                me, opponent, self._active, self._card_db, self._namer, self._last_entities
+                me, opponent, self._active, self._card_db, self._namer, self._frozen_hero_health
             )
             self.turns.append(self._current)
             self._current = None
@@ -951,9 +954,13 @@ class _TurnBuilder:
             number=turn_number,
             player_name=_player_label(active, me),
             opening_draws=[],
-            start=_turn_snapshot(me, opponent, active, self._card_db, self._namer),
+            start=_turn_snapshot(
+                me, opponent, active, self._card_db, self._namer, self._frozen_hero_health
+            ),
             actions=[],
-            end=_turn_snapshot(me, opponent, active, self._card_db, self._namer),
+            end=_turn_snapshot(
+                me, opponent, active, self._card_db, self._namer, self._frozen_hero_health
+            ),
         )
 
     def before_block(self, block: Any, game: Game) -> tuple[_EntitySnapshot, int | None] | None:
@@ -980,6 +987,23 @@ class _TurnBuilder:
         self._touched_ids.add(entity_id)
         self._touch_order.append(entity_id)
 
+    def _freeze_dead_hero_health(
+        self, me: Player, opponent: Player, entities: _EntitySnapshot
+    ) -> None:
+        """Records each hero's health the first time it's seen dead, and
+        never again -- see `_hero_health`. Deliberately first-write-wins,
+        not "most recent": a later top-level block in the same turn (a
+        separate deathrattle trigger, a fatigue tick, ...) can still touch
+        the same already-dead hero's entry in `entities`, and by then its
+        HEALTH tag may already carry a post-mortem rewrite that has nothing
+        to do with the match result."""
+        for hero in (me.hero, opponent.hero):
+            if hero is None or hero.id in self._frozen_hero_health:
+                continue
+            snapshot = entities.get(hero.id)
+            if snapshot is not None and snapshot[0] == Zone.GRAVEYARD:
+                self._frozen_hero_health[hero.id] = snapshot[2]
+
     def after_block(
         self, block: Any, game: Game, before: tuple[_EntitySnapshot, int | None]
     ) -> None:
@@ -987,10 +1011,10 @@ class _TurnBuilder:
             return
         order = self._touch_order
         self._touch_order = None
-        me, _opponent = self._players(game)
+        me, opponent = self._players(game)
         before_entities, mana_before = before
         after_entities = _snapshot_entities(game)
-        self._last_entities = after_entities
+        self._freeze_dead_hero_health(me, opponent, after_entities)
         if _is_merge_only_block(block):
             self._merge_effects_into_last_action(game, me, before_entities, after_entities, order)
             return
@@ -1045,7 +1069,7 @@ class _TurnBuilder:
             return
         me, opponent = self._players(game)
         self._current.end = _turn_snapshot(
-            me, opponent, self._active, self._card_db, self._namer, self._last_entities
+            me, opponent, self._active, self._card_db, self._namer, self._frozen_hero_health
         )
         self.turns.append(self._current)
         self._current = None
@@ -1359,12 +1383,32 @@ def _split_last_game(path: Path) -> tuple[int, list[str]]:
     session-wide parse that had worked for the first two matches then
     raised on the third. Feeding the parser only one match's lines at a
     time -- a fresh `PlayerManager` each call -- sidesteps this entirely.
+
+    Streams the file twice rather than materializing it whole: once to
+    count matches and find where the last one starts (constant memory --
+    `f.tell()` between `readline()` calls, not `for line in f`, which
+    disables `tell()` mid-iteration), then a second read of only *that*
+    match's lines, not the whole session. A long session log can hold many
+    finished matches by the time this runs on every ~2s poll of the
+    current one; only the last match's line count should scale that cost,
+    not the whole session's.
     """
-    lines = path.read_text().splitlines(keepends=True)
-    starts = [i for i, line in enumerate(lines) if _CREATE_GAME_MARKER in line]
-    if not starts:
+    game_count = 0
+    last_game_offset: int | None = None
+    with path.open() as f:
+        offset = f.tell()
+        line = f.readline()
+        while line:
+            if _CREATE_GAME_MARKER in line:
+                game_count += 1
+                last_game_offset = offset
+            offset = f.tell()
+            line = f.readline()
+    if last_game_offset is None:
         return 0, []
-    return len(starts), lines[starts[-1] :]
+    with path.open() as f:
+        f.seek(last_game_offset)
+        return game_count, f.readlines()
 
 
 def parse_log(path: Path) -> ParsedGame:
