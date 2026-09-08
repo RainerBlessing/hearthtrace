@@ -49,6 +49,17 @@ WEAPON_FIXTURE = Path(__file__).parent / "fixtures" / "weapon_match.power.log"
 LETHAL_HEALTH_REWRITE_FIXTURE = (
     Path(__file__).parent / "fixtures" / "lethal_health_rewrite_match.power.log"
 )
+# A real two-match session log (game 2 above, immediately followed by the
+# start of a real game 3): the same account was assigned player_id=2 in
+# game 2 and player_id=1 in game 3 -- ordinary (who goes first is decided
+# fresh every match), but reading both games through one continuous
+# `LogParser`/`PlayerManager` (as `parse_log` used to) makes hslog reject
+# the second assignment as inconsistent with the first and crash. Verified
+# this fixture reproduces that crash byte-for-byte against a bare
+# `hslog.LogParser` before the fix in `_split_last_game`.
+MULTI_GAME_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "multi_game_player_id_conflict.power.log"
+)
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -364,6 +375,22 @@ def test_parse_log_freezes_lethal_heros_health_against_a_post_mortem_tag_rewrite
     last_turn = game.turns[-1]
 
     assert last_turn.end.life.opponent_health == -1
+
+
+def test_parse_log_handles_a_third_match_after_a_players_role_flips() -> None:
+    # Real-match ground truth: this session log holds two matches, and the
+    # same account went from player_id=2 in the first to player_id=1 in
+    # the second -- ordinary, but it used to crash `parse_log` outright
+    # (see `MULTI_GAME_FIXTURE`), losing tracking for the rest of the
+    # session. `parse_log` must isolate each match's lines before handing
+    # them to hslog rather than replaying the whole session through one
+    # shared `PlayerManager`.
+    game = parse_log(MULTI_GAME_FIXTURE)
+
+    assert game.game_index == 2
+    assert game.own_class == "SHAMAN"
+    assert game.opponent_class == "SHAMAN"
+    assert len(game.turns) > 0
 
 
 def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:

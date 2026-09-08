@@ -1308,10 +1308,16 @@ def _insert_opening_draws(turns: list[Turn]) -> None:
 
 
 _LOG_TRUNCATION_MARKER = "Truncating log"
+# The literal marker Hearthstone writes at the start of every match, at the
+# top (non-indented) `GameState` level -- as opposed to the very same text
+# appearing again, indented, a little further down as part of a redundant
+# `PowerTaskList` echo of the same block. Matching the exact, non-indented
+# form is what makes this a reliable one-match-starts-here boundary.
+_CREATE_GAME_MARKER = "GameState.DebugPrintPower() - CREATE_GAME"
 
 
-def _read_log_leniently(parser: LogParser, path: Path) -> bool:
-    """Feed `path` to `parser` one line at a time, skipping any single line
+def _read_log_leniently(parser: LogParser, lines: list[str]) -> bool:
+    """Feed `lines` to `parser` one at a time, skipping any single line
     hslog can't parse instead of aborting the whole read. Returns whether
     Hearthstone's own log-truncation banner was found (see `ParsedGame.
     log_truncated`).
@@ -1327,20 +1333,47 @@ def _read_log_leniently(parser: LogParser, path: Path) -> bool:
     losing all tracking for the rest of a long session.
     """
     truncated = False
-    with path.open() as f:
-        for line in f:
-            if _LOG_TRUNCATION_MARKER in line:
-                truncated = True
-            try:
-                parser.read_line(line)
-            except ParsingError:
-                continue
+    for line in lines:
+        if _LOG_TRUNCATION_MARKER in line:
+            truncated = True
+        try:
+            parser.read_line(line)
+        except ParsingError:
+            continue
     return truncated
 
 
+def _split_last_game(path: Path) -> tuple[int, list[str]]:
+    """Splits a whole session log -- which can hold several matches back to
+    back, see `ParsedGame.game_index` -- into "how many matches does it
+    hold" and "the lines of just the latest one".
+
+    Only the latest match's lines are ever fed to a `LogParser`: hslog's
+    `PlayerManager` is a single registry shared across everything it reads,
+    keyed by account name, and it hard-errors (`InconsistentPlayerIdError`)
+    the moment the *same* account is assigned a different `player_id` than
+    it had in an earlier match -- which is completely ordinary (who goes
+    first is decided fresh every match), not a real inconsistency. Verified
+    against a real session log where it happened: two matches in, the same
+    account went from player_id 2 to player_id 1 and the exact same
+    session-wide parse that had worked for the first two matches then
+    raised on the third. Feeding the parser only one match's lines at a
+    time -- a fresh `PlayerManager` each call -- sidesteps this entirely.
+    """
+    lines = path.read_text().splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if _CREATE_GAME_MARKER in line]
+    if not starts:
+        return 0, []
+    return len(starts), lines[starts[-1] :]
+
+
 def parse_log(path: Path) -> ParsedGame:
+    game_count, lines = _split_last_game(path)
+    if game_count == 0:
+        raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
+
     parser = LogParser()
-    log_truncated = _read_log_leniently(parser, path)
+    log_truncated = _read_log_leniently(parser, lines)
 
     if not parser.games:
         raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
@@ -1366,7 +1399,7 @@ def parse_log(path: Path) -> ParsedGame:
         starting_deck=me.known_starting_deck_list,
         result=_result_for(me),
         drawn_card_ids=not_in_deck,
-        game_index=len(parser.games),
+        game_index=game_count,
         mulligan=mulligan,
         turns=builder.turns,
         log_truncated=log_truncated,
