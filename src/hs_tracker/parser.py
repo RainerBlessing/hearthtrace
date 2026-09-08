@@ -284,14 +284,34 @@ def _mana_state(player: Player) -> ManaState:
     )
 
 
-def _life_state(me: Player, opponent: Player) -> LifeState:
+def _hero_health(hero: Entity, frozen: "_EntitySnapshot | None") -> int:
+    # A dead hero's own HEALTH tag can still change afterwards -- e.g. an
+    # aura enchantment (Prince Renathal's +10 Health) attached to the hero
+    # gets cleaned up as part of the same death processing, which
+    # recalculates HEALTH back down from 40 to the base 30. That rewrite is
+    # pure post-mortem bookkeeping, not a gameplay event, but a live re-read
+    # of `HEALTH - DAMAGE` at export time can't tell the difference and
+    # would report a wrong, inflated-magnitude number (observed for real:
+    # -11 instead of the true -1 at the moment of death). Once the hero is
+    # in the graveyard, trust the last snapshot taken *during* the replay
+    # (via `_TurnBuilder.after_block`, before any such trailing rewrite)
+    # instead of re-reading its tags now.
+    if hero.zone == Zone.GRAVEYARD and frozen is not None:
+        cached = frozen.get(hero.id)
+        if cached is not None:
+            return cached[2]
+    return hero.tags.get(GameTag.HEALTH, 0) - hero.tags.get(GameTag.DAMAGE, 0)
+
+
+def _life_state(
+    me: Player, opponent: Player, frozen: "_EntitySnapshot | None" = None
+) -> LifeState:
     my_hero, their_hero = me.hero, opponent.hero
     assert my_hero is not None and their_hero is not None
     return LifeState(
-        own_health=my_hero.tags.get(GameTag.HEALTH, 0) - my_hero.tags.get(GameTag.DAMAGE, 0),
+        own_health=_hero_health(my_hero, frozen),
         own_armor=my_hero.tags.get(GameTag.ARMOR, 0),
-        opponent_health=their_hero.tags.get(GameTag.HEALTH, 0)
-        - their_hero.tags.get(GameTag.DAMAGE, 0),
+        opponent_health=_hero_health(their_hero, frozen),
         opponent_armor=their_hero.tags.get(GameTag.ARMOR, 0),
     )
 
@@ -365,14 +385,19 @@ def _weapon_of(player: Player, card_db: Any) -> WeaponState | None:
 
 
 def _turn_snapshot(
-    me: Player, opponent: Player, active: Player, card_db: Any, namer: "_InstanceNamer"
+    me: Player,
+    opponent: Player,
+    active: Player,
+    card_db: Any,
+    namer: "_InstanceNamer",
+    frozen: "_EntitySnapshot | None" = None,
 ) -> TurnSnapshot:
     # Life/hand/board are always shown from the friendly player's own point
     # of view (Du/Gegner); mana is shown for whoever's turn it is, since
     # that's the resource that turn's actions are actually spent from.
     return TurnSnapshot(
         mana=_mana_state(active),
-        life=_life_state(me, opponent),
+        life=_life_state(me, opponent, frozen),
         hand=_hand_state(me, opponent, card_db),
         board=_board_state(me, opponent, namer),
         own_weapon=_weapon_of(me, card_db),
@@ -879,6 +904,12 @@ class _TurnBuilder:
         # blocks never pollutes the next tracked block's order.
         self._touch_order: list[int] | None = None
         self._touched_ids: set[int] = set()
+        # Entity health/damage as of the most recently completed top-level
+        # block -- kept around so a hero's *final* health can still be read
+        # correctly even if the game later rewrites its HEALTH tag for
+        # reasons that have nothing to do with the match result (see
+        # `_hero_health`). Updated on every `after_block` call.
+        self._last_entities: _EntitySnapshot = {}
         self.turns: list[Turn] = []
 
     def _players(self, game: Game) -> tuple[Player, Player]:
@@ -898,7 +929,7 @@ class _TurnBuilder:
         if self._current is not None and self._active is not None:
             me, opponent = self._players(game)
             self._current.end = _turn_snapshot(
-                me, opponent, self._active, self._card_db, self._namer
+                me, opponent, self._active, self._card_db, self._namer, self._last_entities
             )
             self.turns.append(self._current)
             self._current = None
@@ -959,6 +990,7 @@ class _TurnBuilder:
         me, _opponent = self._players(game)
         before_entities, mana_before = before
         after_entities = _snapshot_entities(game)
+        self._last_entities = after_entities
         if _is_merge_only_block(block):
             self._merge_effects_into_last_action(game, me, before_entities, after_entities, order)
             return
@@ -1012,7 +1044,9 @@ class _TurnBuilder:
         if self._current is None or self._active is None:
             return
         me, opponent = self._players(game)
-        self._current.end = _turn_snapshot(me, opponent, self._active, self._card_db, self._namer)
+        self._current.end = _turn_snapshot(
+            me, opponent, self._active, self._card_db, self._namer, self._last_entities
+        )
         self.turns.append(self._current)
         self._current = None
 

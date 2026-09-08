@@ -40,6 +40,15 @@ FIXTURE = Path(__file__).parent / "fixtures" / "sample_match.power.log"
 # no weapon in it at all -- the opponent (Rogue) repeatedly equips and uses
 # a Wicked Knife via Dagger Mastery.
 WEAPON_FIXTURE = Path(__file__).parent / "fixtures" / "weapon_match.power.log"
+# A third real match, captured because the opponent's lethal-dealing hero
+# had a Prince Renathal +10 Health aura attached: once that hero died, the
+# engine cleaned up the aura and rewrote the hero's own (by then irrelevant)
+# HEALTH tag from 40 back down to base 30 -- a live re-read at export time
+# doesn't know that DAMAGE=41 was reached while HEALTH was still 40, and
+# would report opponent_health=-11 instead of the true -1.
+LETHAL_HEALTH_REWRITE_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "lethal_health_rewrite_match.power.log"
+)
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -339,6 +348,22 @@ def test_parse_log_tracks_a_real_weapons_durability() -> None:
     assert turn4.end.opponent_weapon.attack == 1
     assert turn4.end.opponent_weapon.durability == 1  # already used once this turn
     assert turn6.end.opponent_weapon is None
+
+
+def test_parse_log_freezes_lethal_heros_health_against_a_post_mortem_tag_rewrite() -> None:
+    # Real-match ground truth: the opponent's hero had a Prince Renathal
+    # +10 Health aura in play (HEALTH tag showing 40) when a lethal attack
+    # took DAMAGE to 41. Immediately after, the engine cleaned up that
+    # aura (now moot, the hero is dead) and rewrote HEALTH back down to the
+    # base 30 -- a value that was never true *during* the match, only
+    # afterwards, as bookkeeping. The per-action effect trail (built from a
+    # snapshot taken right after the lethal attack, before that rewrite)
+    # already showed the correct 2 -> -1; the turn's closing snapshot must
+    # match it, not the post-mortem HEALTH=30 giving -11.
+    game = parse_log(LETHAL_HEALTH_REWRITE_FIXTURE)
+    last_turn = game.turns[-1]
+
+    assert last_turn.end.life.opponent_health == -1
 
 
 def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:
