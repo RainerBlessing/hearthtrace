@@ -14,7 +14,7 @@ Arena/Battlegrounds/Tavern Brawl).
   Abschnitt "Log-Zugriff unter Wine", falls das noch nicht eingerichtet ist).
 - Python-Umgebung mit den Projektabhängigkeiten installiert:
   ```bash
-  cd /home/rainer/projects/hs-tracker
+  cd hs-tracker
   python -m venv .venv
   .venv/bin/pip install -e ".[dev]"
   ```
@@ -39,11 +39,12 @@ export_dir = "~/HearthstoneAnalysis"
 1. **Hearthstone starten** (wie gewohnt über Lutris).
 2. **HS Tracker starten** — entweder direkt:
    ```bash
-   cd /home/rainer/projects/hs-tracker
+   cd hs-tracker
    .venv/bin/python -m hs_tracker.app
    ```
    oder als Desktop-Eintrag installieren, damit er im App-Launcher
-   auftaucht:
+   auftaucht (den `Exec=`-Pfad in `hs-tracker.desktop` vorher auf den
+   eigenen Installationspfad anpassen):
    ```bash
    cp hs-tracker.desktop ~/.local/share/applications/
    ```

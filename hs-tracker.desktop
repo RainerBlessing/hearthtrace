@@ -2,6 +2,6 @@
 Type=Application
 Name=HS Tracker
 Comment=Nativer Hearthstone Deck Tracker
-Exec=/home/rainer/projects/hs-tracker/.venv/bin/python -m hs_tracker.app
+Exec=/path/to/hs-tracker/.venv/bin/python -m hs_tracker.app
 StartupWMClass=dev.rainer.hs-tracker
 Categories=Game;Utility;
