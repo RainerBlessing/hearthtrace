@@ -17,7 +17,12 @@ from hs_tracker.deck_state import remaining_deck  # noqa: E402
 from hs_tracker.log_reader import find_latest_power_log  # noqa: E402
 from hs_tracker.log_setup import check_log_setup, disable_log_size_limit  # noqa: E402
 from hs_tracker.markdown_export import export_match_summary  # noqa: E402
-from hs_tracker.match_history import format_history_row, load_match_history  # noqa: E402
+from hs_tracker.match_history import (  # noqa: E402
+    MatchHistoryEntry,
+    format_history_row,
+    load_match_history,
+    record_replay_source,
+)
 from hs_tracker.parser import (  # noqa: E402
     HandCard,
     MinionState,
@@ -26,6 +31,7 @@ from hs_tracker.parser import (  # noqa: E402
     Turn,
     TurnSnapshot,
     parse_log,
+    parse_log_at_index,
 )
 
 # Terminal `PlayState` values (mirrors `markdown_export.RESULT_LABELS`'
@@ -155,12 +161,23 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._replay_game: ParsedGame | None = None
         self._replay_turn_index = 0
         self._replay_stage = _REPLAY_STAGE_START
+        # Non-None while Replay is pinned to a specific past match opened
+        # from Verlauf (log_path, game_index) -- while pinned, the live
+        # poll (`_update_replay_state`) must not silently replace what's
+        # being reviewed, the same way it already won't yank the viewer
+        # back to "now" mid-match (see that method's own docstring). The
+        # live game is still stashed on every poll regardless
+        # (`_live_replay_game`), so "back to live" has something to
+        # restore without waiting for the next poll tick.
+        self._replay_source: tuple[Path, int] | None = None
+        self._live_replay_game: ParsedGame | None = None
 
         header_bar = Adw.HeaderBar()
         # Adw.ToggleGroup (libadwaita >=1.7): a real segmented control, not
         # Adw.ViewStack/ViewSwitcher -- this window is only 320px wide, too
         # narrow for switcher chrome to look right.
-        view_group = Adw.ToggleGroup()
+        self._view_group = Adw.ToggleGroup()
+        view_group = self._view_group
         for name, label in (("tracker", "Live"), ("history", "Verlauf"), ("replay", "Replay")):
             toggle = Adw.Toggle()
             toggle.set_name(name)
@@ -179,7 +196,9 @@ class TrackerWindow(Adw.ApplicationWindow):
         tracker_box.append(self._status_label)
         tracker_box.append(self._deck_list)
 
+        self._history_entries: list[MatchHistoryEntry] = []
         self._history_list = Gtk.ListBox()
+        self._history_list.connect("row-activated", self._on_history_row_activated)
         history_scroller = Gtk.ScrolledWindow()
         history_scroller.set_child(self._clamp(self._history_list))
 
@@ -245,12 +264,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         try:
             disable_log_size_limit(self._config.logs_dir.parent)
         except OSError as e:
-            error = Adw.AlertDialog(
-                heading="Fehler",
-                body=f"client.config konnte nicht geschrieben werden: {e}",
-            )
-            error.add_response("ok", "OK")
-            error.present(self)
+            self._show_error_dialog("Fehler", f"client.config konnte nicht geschrieben werden: {e}")
 
     @staticmethod
     def _clamp(child: Gtk.Widget) -> Adw.Clamp:
@@ -306,8 +320,26 @@ class TrackerWindow(Adw.ApplicationWindow):
         header_cluster.append(self._replay_position_label)
         header_cluster.append(self._replay_stage_group)
 
+        # Hidden unless Replay is pinned to a past match opened from
+        # Verlauf (see `_replay_source`) -- otherwise this row would just
+        # be empty chrome for the overwhelmingly common "watching the
+        # current match" case.
+        self._replay_pin_label = Gtk.Label(xalign=0.5)
+        self._replay_pin_label.add_css_class("caption")
+        self._replay_pin_label.add_css_class("dim-label")
+        self._replay_unpin_button = Gtk.Button(label="Zur aktuellen Partie")
+        self._replay_unpin_button.add_css_class("flat")
+        self._replay_unpin_button.connect("clicked", self._on_replay_unpin)
+        pin_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        pin_row.set_halign(Gtk.Align.CENTER)
+        pin_row.append(self._replay_pin_label)
+        pin_row.append(self._replay_unpin_button)
+        pin_row.set_visible(False)
+        self._replay_pin_row = pin_row
+
         replay_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         replay_box.append(header_cluster)
+        replay_box.append(pin_row)
         replay_box.append(Gtk.Separator())
         replay_box.append(self._replay_content_box)
 
@@ -342,8 +374,9 @@ class TrackerWindow(Adw.ApplicationWindow):
         """
         while (row := self._history_list.get_row_at_index(0)) is not None:
             self._history_list.remove(row)
+        self._history_entries = []
         try:
-            entries = load_match_history(self._config.export_dir)
+            entries = load_match_history(self._config.export_dir, state_dir=_STATE_DIR)
         except Exception as exc:  # noqa: BLE001 - must never break the toggle
             print(f"hs-tracker: error while loading match history: {exc}", file=sys.stderr)
             self._history_list.append(Gtk.Label(label="Fehler beim Laden des Verlaufs", xalign=0))
@@ -351,8 +384,50 @@ class TrackerWindow(Adw.ApplicationWindow):
         if not entries:
             self._history_list.append(Gtk.Label(label="Noch keine Partien gespeichert", xalign=0))
             return
+        self._history_entries = entries
         for entry in entries:
             self._history_list.append(Gtk.Label(label=format_history_row(entry), xalign=0))
+
+    def _on_history_row_activated(self, _list_box: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
+        """Opens the clicked Verlauf entry's match in Replay, pinned (see
+        `_replay_source`) so the live poll doesn't silently swap it back
+        out. Rows are appended in the same order as `_history_entries`, so
+        the row's own index is the entry's index -- no per-row data
+        attachment needed."""
+        index = row.get_index()
+        if index < 0 or index >= len(self._history_entries):
+            return
+        entry = self._history_entries[index]
+        if entry.log_path is None or entry.game_index is None:
+            self._show_error_dialog(
+                "Replay nicht verfügbar",
+                "Für dieses Match wurde keine Replay-Quelle aufgezeichnet "
+                "(z. B. ein Export von vor dieser Funktion).",
+            )
+            return
+        if not entry.log_path.exists():
+            self._show_error_dialog(
+                "Replay nicht verfügbar",
+                f"Das ursprüngliche Log existiert nicht mehr: {entry.log_path}",
+            )
+            return
+        try:
+            game = parse_log_at_index(entry.log_path, entry.game_index)
+        except (NoGameFoundError, OSError) as exc:
+            self._show_error_dialog("Replay nicht verfügbar", str(exc))
+            return
+
+        self._replay_game = game
+        self._replay_turn_index = 0
+        self._replay_stage = _REPLAY_STAGE_START
+        self._replay_source = (entry.log_path, entry.game_index)
+        self._replay_stage_group.set_active_name(_REPLAY_STAGE_START)
+        self._view_group.set_active_name("replay")
+
+    def _show_error_dialog(self, heading: str, body: str) -> None:
+        dialog = Adw.AlertDialog(heading=heading, body=body)
+        dialog.add_response("ok", "OK")
+        dialog.present(self)
 
     def _on_replay_prev(self, _button: Gtk.Button) -> None:
         self._replay_turn_index = max(0, self._replay_turn_index - 1)
@@ -380,7 +455,13 @@ class TrackerWindow(Adw.ApplicationWindow):
         bottom") -- but leaves the index alone if the user had navigated
         back to inspect an earlier turn, so a live-updating match doesn't
         keep yanking them back to "now" every 2 seconds.
+
+        `game` is stashed into `_live_replay_game` unconditionally, even
+        while pinned to a past match from Verlauf -- see `_replay_source`.
         """
+        self._live_replay_game = game
+        if self._replay_source is not None:
+            return
         previous = self._replay_game
         is_new_match = previous is None or game.game_index != previous.game_index
         was_following_latest = previous is not None and (
@@ -418,7 +499,17 @@ class TrackerWindow(Adw.ApplicationWindow):
             return False
         return True
 
+    def _on_replay_unpin(self, _button: Gtk.Button) -> None:
+        self._replay_source = None
+        game = self._live_replay_game
+        self._replay_game = game
+        self._replay_turn_index = max(0, len(game.turns) - 1) if game is not None else 0
+        self._refresh_replay_view()
+
     def _refresh_replay_view(self) -> None:
+        self._replay_pin_row.set_visible(self._replay_source is not None)
+        if self._replay_source is not None:
+            self._replay_pin_label.set_label("Verlauf-Ansicht (nicht die aktuelle Partie)")
         game = self._replay_game
         if game is None or not game.turns:
             self._replay_turn_label.set_label("Keine Züge verfügbar")
@@ -718,6 +809,12 @@ class TrackerWindow(Adw.ApplicationWindow):
         popover.set_child(label)
         popover.set_parent(widget)
         popover.set_autohide(True)
+        # `set_parent` doesn't make GTK unparent the popover automatically
+        # when `widget` itself is torn down (e.g. `_clear_box` rebuilding
+        # the board every turn navigation) -- without this, GTK warns
+        # "Finalizing GtkFrame ... but it still has children left" on
+        # every single re-render.
+        widget.connect("destroy", lambda _widget: popover.unparent())
         click = Gtk.GestureClick()
         click.connect("released", lambda *_args: popover.popup())
         widget.add_controller(click)
@@ -849,7 +946,15 @@ class TrackerWindow(Adw.ApplicationWindow):
         export_key = f"{log_path}:{game.game_index}"
         if export_key == self._last_exported_key:
             return
-        export_match_summary(game, export_dir=self._config.export_dir)
+        export_path = export_match_summary(game, export_dir=self._config.export_dir)
+        # Best-effort: a failure here must not stop the export itself from
+        # being marked done (see below) -- losing the Verlauf-to-Replay
+        # link for one match is far less bad than re-exporting it forever
+        # because this raised before `_save_last_exported_key` ran.
+        try:
+            record_replay_source(_STATE_DIR, export_path, log_path, game.game_index)
+        except OSError as exc:
+            print(f"hs-tracker: could not record replay source: {exc}", file=sys.stderr)
         # Marker saved to disk *before* the in-memory key is updated: if
         # `_save_last_exported_key` itself throws (e.g. the state dir just
         # became unwritable), the in-memory key must stay unset too, or a
