@@ -35,7 +35,7 @@ strip stray underscore placeholders Hearthstone's XML uses for spacing).
 card_ids from the existing fixtures (no invented data).
 **Tests**: TDD -- description sanitizing, keyword-list building, unknown
 card_id fallback.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 3: Hover/click UI in the Replay view
 **Goal**: mouse-over a board minion or own-hand chip shows a small popover
