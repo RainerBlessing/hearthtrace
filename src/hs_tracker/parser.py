@@ -285,6 +285,31 @@ def _player_label(player: Player | None, friendly_player: Player) -> str:
     return "Du" if player is friendly_player else "Gegner"
 
 
+def _active_player(game: Game, turn_number: int) -> Player | None:
+    """Whose turn it actually is, read from the live CURRENT_PLAYER tag --
+    not assumed from turn-number parity. A card like Temporus ("Your
+    opponent takes 2 turns. Then you take 2 turns.") breaks the normal
+    strict-alternation assumption a parity computation would make, while
+    the global turn counter keeps incrementing right through it -- a
+    parity-based `active` silently mislabels every turn's own/opponent
+    attribution for the rest of the match once that happens. Verified
+    against a real match: right after a Temporus play, one turn's entire
+    action trail was clearly the opponent's ("Gegner: ..." throughout),
+    but a parity computation labeled that turn "Du".
+    """
+    for player in game.players:
+        if player.tags.get(GameTag.CURRENT_PLAYER, 0):
+            return player
+    # Defensive fallback, never observed in practice: CURRENT_PLAYER is
+    # already set (verified in a real log) well before STEP reaches
+    # MAIN_ACTION, which is what triggers this call -- but if it were
+    # ever missing, falling back to the old parity assumption is at least
+    # right for a normal, extra-turn-free match.
+    first = game.first_player
+    others = [p for p in game.players if p is not first]
+    return first if turn_number % 2 == 1 else (others[0] if others else first)
+
+
 # --- Turn snapshots (mana / life / hand / board) --------------------------
 
 
@@ -997,9 +1022,7 @@ class _TurnBuilder:
         self._pending_turn_number = None
         self._game = game
         me, opponent = self._players(game)
-        first = game.first_player
-        others = [p for p in game.players if p is not first]
-        active = first if turn_number % 2 == 1 else (others[0] if others else first)
+        active = _active_player(game, turn_number)
         assert active is not None
         self._active = active
         self._current = Turn(

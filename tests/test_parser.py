@@ -70,6 +70,15 @@ MULTI_GAME_FIXTURE = (
 END_OF_TURN_TRIGGER_FIXTURE = (
     Path(__file__).parent / "fixtures" / "end_of_turn_trigger_match.power.log"
 )
+# A real match where the friendly player plays Temporus ("Your opponent
+# takes 2 turns. Then you take 2 turns.") on turn 19. User-reported: turn
+# 21's action trail was clearly the opponent's, but the export labeled it
+# "Zug 21 - Du"; turn 22 was clearly the friendly player's, labeled
+# "Zug 22 - Gegner" -- a parity-based (turn_number % 2) guess at whose
+# turn it is breaks the moment a card stops turns from strictly
+# alternating, and the global turn counter never re-syncs with it on its
+# own for the rest of the match.
+EXTRA_TURN_FIXTURE = Path(__file__).parent / "fixtures" / "extra_turn_match.power.log"
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -462,6 +471,29 @@ def test_parse_log_at_index_rejects_an_out_of_range_index() -> None:
         parse_log_at_index(MULTI_GAME_FIXTURE, game_index=3)
     with pytest.raises(NoGameFoundError):
         parse_log_at_index(MULTI_GAME_FIXTURE, game_index=0)
+
+
+def test_parse_log_attributes_turns_correctly_across_an_extra_turn_card() -> None:
+    # Real-match ground truth (user-reported): Temporus is played on turn
+    # 19; turns 20-21 both actually belong to the opponent (their two
+    # extra turns), turns 22-23 both actually belong to the friendly
+    # player (their two extra turns) -- verified against the raw log's
+    # own CURRENT_PLAYER tag, not assumed. A parity-based guess gets 20
+    # right by coincidence (it would have been the opponent's turn
+    # anyway) but mislabels 21 and 22, only "recovering" by another
+    # coincidence at 23.
+    game = parse_log(EXTRA_TURN_FIXTURE)
+    by_number = {t.number: t for t in game.turns}
+
+    assert by_number[19].player_name == "Du"
+    assert by_number[20].player_name == "Gegner"
+    assert by_number[21].player_name == "Gegner"
+    assert by_number[22].player_name == "Du"
+    assert by_number[23].player_name == "Du"
+    # Each turn's own action trail must agree with its label -- the
+    # mislabeled turns' actions were never wrong, only the header was.
+    assert all(a.headline.startswith("Gegner:") for a in by_number[21].actions)
+    assert all(a.headline.startswith("Du:") for a in by_number[22].actions)
 
 
 def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:
