@@ -60,6 +60,15 @@ LETHAL_HEALTH_REWRITE_FIXTURE = (
 MULTI_GAME_FIXTURE = (
     Path(__file__).parent / "fixtures" / "multi_game_player_id_conflict.power.log"
 )
+# A real match where the opponent's Factory Assemblybot (Miniaturize: "At
+# the end of your turn, summon a 6/7 Bot that attacks a random enemy")
+# fires its end-of-turn trigger against the friendly hero. User-reported:
+# the resulting 6 damage and the summoned Copybot were both completely
+# absent from turn 27's action log, even though the turn's closing
+# snapshot correctly reflected them (23 -> 15 life, not 23 -> 21).
+END_OF_TURN_TRIGGER_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "end_of_turn_trigger_match.power.log"
+)
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -422,6 +431,25 @@ def test_parse_log_handles_a_third_match_after_a_players_role_flips() -> None:
     assert game.own_class == "SHAMAN"
     assert game.opponent_class == "SHAMAN"
     assert len(game.turns) > 0
+
+
+def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:
+    # Real-match ground truth (user-reported): a card's own end-of-turn
+    # trigger (Factory Assemblybot's Miniaturize) is itself a top-level
+    # BlockType.TRIGGER block, which isn't an action type and isn't a
+    # deathrattle merge -- so it's never tracked as its own action. The
+    # ATTACK block it summons and immediately triggers is *nested inside*
+    # that untracked trigger, and used to inherit its untracked-ness
+    # (`_depth` stayed incremented for the whole untracked block's
+    # duration), silently dropping a real 6-damage attack from the log
+    # even though the turn's closing snapshot already reflected it.
+    game = parse_log(END_OF_TURN_TRIGGER_FIXTURE)
+    turn27 = next(t for t in game.turns if t.number == 27)
+
+    assert turn27.start.life.own_health == 23
+    assert turn27.end.life.own_health == 15  # not 21 -- the missing 6 damage
+    attack = next(a for a in turn27.actions if "Copybot #2" in a.headline)
+    assert attack.headline == "Gegner: Copybot #2 (6 Angriff) → Dein Held: 21 → 15"
 
 
 def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:

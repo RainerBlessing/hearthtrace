@@ -744,6 +744,29 @@ def _mana_headline_suffix(mana_before: int | None, mana_after: int | None) -> st
     return f" (Mana: {mana_before} → {mana_after})"
 
 
+def _resolve_attack_defender(
+    block: Any, game: Game, before: _EntitySnapshot, after: _EntitySnapshot
+) -> Entity | None:
+    """The attack's actual target entity. Usually `block.target` names it
+    directly, but an engine-triggered "attacks a random enemy" effect
+    (e.g. Factory Assemblybot's Miniaturize) prints its BLOCK_START with
+    Target=0 -- the real target is only conveyed moments later, via a
+    PROPOSED_DEFENDER tag change *inside* the block, which hslog's
+    `Block.target` is never updated to reflect (it's parsed once, from
+    the BLOCK_START line itself, and reset to 0 again before the block
+    ends -- verified against a real match's raw log). Falls back to
+    whichever other entity actually took damage during this block."""
+    defender = game.find_entity_by_id(block.target)
+    if defender is not None:
+        return defender
+    for entity_id, (_zone, _atk, health, _armor, _card_id) in after.items():
+        if entity_id == block.entity:
+            continue
+        if health < before.get(entity_id, _NOT_TRACKED)[2]:
+            return game.find_entity_by_id(entity_id)
+    return None
+
+
 def _attack_headline(
     block: Any,
     game: Game,
@@ -759,7 +782,7 @@ def _attack_headline(
     e.g. bounced by a triggered Secret) suppresses the hero-target life
     fold, since no damage was actually dealt to fold in."""
     attacker = game.find_entity_by_id(block.entity)
-    defender = game.find_entity_by_id(block.target)
+    defender = _resolve_attack_defender(block, game, before, after)
     player_label = _player_label(attacker.controller if attacker else None, friendly_player)
     if attacker is None or defender is None:
         return f"{player_label}: Angriff", frozenset()
@@ -774,12 +797,12 @@ def _attack_headline(
     attacker_label = f"{attacker_name} ({attacker_attack} Angriff)"
     if interrupted:
         return f"{player_label}: {attacker_label} → {defender_name}", frozenset()
-    health_before = before.get(block.target, _NOT_TRACKED)[2]
-    health_after = after.get(block.target, _NOT_TRACKED)[2]
+    health_before = before.get(defender.id, _NOT_TRACKED)[2]
+    health_after = after.get(defender.id, _NOT_TRACKED)[2]
     headline = (
         f"{player_label}: {attacker_label} → {defender_name}: {health_before} → {health_after}"
     )
-    return headline, frozenset({block.target})
+    return headline, frozenset({defender.id})
 
 
 def _target_suffix(
@@ -1117,11 +1140,26 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
     def handle_block(self, packet: Any) -> None:
         is_top = self._depth == 0
         before = self._builder.before_block(packet, self.game) if is_top and self.game else None
-        self._depth += 1
+        # Only descend into "nested" territory for a block that was itself
+        # tracked (an action, or a deaths/deathrattle merge) -- an
+        # *untracked* top-level block (e.g. a card's own end-of-turn
+        # TRIGGER, which is neither) has no action of its own to fold
+        # anything into, so its children must still get their own chance
+        # to be top-level actions. Verified against a real match: Factory
+        # Assemblybot's "at end of turn, summon a 6/7 Bot that attacks a
+        # random enemy" fires as an untracked top-level TRIGGER wrapping a
+        # nested ATTACK block -- with unconditional descent, that ATTACK's
+        # very real 6 damage (and the Bot's own appearance) never made it
+        # into the action log at all, even though the turn's closing
+        # snapshot already reflected it.
+        tracked = before is not None
+        if tracked:
+            self._depth += 1
         try:
             super().handle_block(packet)
         finally:
-            self._depth -= 1
+            if tracked:
+                self._depth -= 1
         if is_top and before is not None and self.game is not None:
             self._builder.after_block(packet, self.game, before)
 
