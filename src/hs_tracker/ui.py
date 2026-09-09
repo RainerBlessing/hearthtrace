@@ -17,6 +17,7 @@ from hs_tracker.log_setup import check_log_setup, disable_log_size_limit  # noqa
 from hs_tracker.markdown_export import export_match_summary  # noqa: E402
 from hs_tracker.match_history import format_history_row, load_match_history  # noqa: E402
 from hs_tracker.parser import (  # noqa: E402
+    HandCard,
     MinionState,
     NoGameFoundError,
     ParsedGame,
@@ -116,7 +117,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         # Loaded once here rather than per poll tick: it's a static XML
         # dataset (the same one parser.py/markdown_export.py load), so
         # re-loading it every 2s would be pure waste.
-        self._card_db, _ = load_cards()
+        self._card_db, _ = load_cards(locale="deDE")
         # The most recently parsed game and which of its turns Replay is
         # currently showing -- kept independent of `_last_log_path`/
         # `_last_log_mtime` (which gate *whether* to re-parse) since Replay
@@ -632,13 +633,13 @@ class TrackerWindow(Adw.ApplicationWindow):
         return frame
 
     @staticmethod
-    def _build_hand_flowbox(card_names: list[str]) -> Gtk.FlowBox:
+    def _build_hand_flowbox(cards: list[HandCard]) -> Gtk.FlowBox:
         flow = Gtk.FlowBox()
         flow.set_selection_mode(Gtk.SelectionMode.NONE)
         flow.set_min_children_per_line(1)
         flow.set_max_children_per_line(10)
-        for name in card_names:
-            flow.append(TrackerWindow._build_hand_chip(name))
+        for card in cards:
+            flow.append(TrackerWindow._build_hand_chip(card.name))
         return flow
 
     @staticmethod

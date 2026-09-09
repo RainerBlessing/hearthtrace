@@ -48,7 +48,7 @@ def _render_board(label: str, minions: list[MinionState]) -> list[str]:
 
 def _render_hand(hand: HandState) -> list[str]:
     lines = ["Hand (Du):"]
-    lines += [f"- {name}" for name in hand.own_cards] if hand.own_cards else ["- (leer)"]
+    lines += [f"- {card.name}" for card in hand.own_cards] if hand.own_cards else ["- (leer)"]
     lines += ["", f"Hand (Gegner): {hand.opponent_count} Karten"]
     return lines
 
@@ -137,7 +137,7 @@ def _render_turn(turn: Turn) -> list[str]:
 
 def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
     when = when or datetime.now()
-    card_db, _ = load_cards()
+    card_db, _ = load_cards(locale="deDE")
     deck_names = _card_names(game.starting_deck, card_db)
     remaining_names = _card_names(deck_state.remaining_deck(game), card_db)
 

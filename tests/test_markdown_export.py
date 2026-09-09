@@ -4,6 +4,7 @@ from hs_tracker.markdown_export import export_match_summary, render_match_summar
 from hs_tracker.parser import (
     Action,
     BoardState,
+    HandCard,
     HandState,
     LifeState,
     ManaState,
@@ -146,7 +147,7 @@ def test_render_match_summary_includes_full_deck_section_with_card_names() -> No
     # so, not claim this is the whole deck.
     assert "**Bekannte Deck-Karten:**" in markdown
     assert "**Deck:**" not in markdown
-    assert "Polymorph" in markdown  # CS2_022
+    assert "Verwandlung" in markdown  # CS2_022
     assert "2 Karten" in markdown
 
 
@@ -180,7 +181,7 @@ def test_render_match_summary_includes_remaining_deck_section() -> None:
 
     assert "## Restdeck bei Spielende" in markdown
     assert "Noch 29 Karten im Deck" in markdown
-    assert "Arcane Intellect" in markdown.split("## Restdeck bei Spielende")[1]
+    assert "Arkane Intelligenz" in markdown.split("## Restdeck bei Spielende")[1]
 
 
 def test_render_match_summary_labels_remaining_deck_as_known_only_when_incomplete() -> None:
@@ -197,7 +198,7 @@ def test_render_match_summary_labels_remaining_deck_as_known_only_when_incomplet
 
     assert "## Bekannte Karten im Restdeck" in markdown
     assert "## Restdeck bei Spielende" not in markdown
-    assert "1 bekannte Karten: Arcane Intellect" in markdown
+    assert "1 bekannte Karten: Arkane Intelligenz" in markdown
 
 
 def test_render_match_summary_includes_mulligan_section_with_card_names() -> None:
@@ -214,8 +215,8 @@ def test_render_match_summary_includes_mulligan_section_with_card_names() -> Non
     markdown = render_match_summary(game)
 
     assert "## Mulligan" in markdown
-    assert "- Behalten: Arcane Intellect" in markdown
-    assert "- Zurückgelegt: Polymorph" in markdown
+    assert "- Behalten: Arkane Intelligenz" in markdown
+    assert "- Zurückgelegt: Verwandlung" in markdown
 
 
 def test_render_match_summary_omits_mulligan_section_when_none() -> None:
@@ -250,11 +251,21 @@ def test_render_match_summary_includes_mana_life_hand_and_board_snapshot() -> No
                     life=LifeState(
                         own_health=27, own_armor=2, opponent_health=24, opponent_armor=0
                     ),
-                    hand=HandState(own_cards=["Hex", "Lightning Bolt"], opponent_count=5),
+                    hand=HandState(
+                        own_cards=[
+                            HandCard(name="Hex", card_id="EX1_246"),
+                            HandCard(name="Lightning Bolt", card_id="CS2_045"),
+                        ],
+                        opponent_count=5,
+                    ),
                     board=BoardState(
                         own=[
                             MinionState(
-                                name="Skywall Sentinel", attack=0, health=2, keywords=["Spott"]
+                                name="Skywall Sentinel",
+                                attack=0,
+                                health=2,
+                                keywords=["Spott"],
+                                card_id="CATA_565",
                             )
                         ],
                         opponent=[],
@@ -286,7 +297,9 @@ def test_render_match_summary_includes_weapon_line() -> None:
             _turn(
                 number=3,
                 start=_snapshot(
-                    own_weapon=WeaponState(name="Fiery War Axe", attack=3, durability=2)
+                    own_weapon=WeaponState(
+                        name="Fiery War Axe", attack=3, durability=2, card_id="CS2_106"
+                    )
                 ),
             )
         ],
@@ -313,7 +326,10 @@ def test_render_match_summary_omits_hand_and_armor_from_end_snapshot() -> None:
             _turn(
                 number=1,
                 start=_snapshot(
-                    hand=HandState(own_cards=["Fireball"], opponent_count=3),
+                    hand=HandState(
+                        own_cards=[HandCard(name="Fireball", card_id="CS2_029")],
+                        opponent_count=3,
+                    ),
                     life=LifeState(
                         own_health=30, own_armor=5, opponent_health=30, opponent_armor=0
                     ),

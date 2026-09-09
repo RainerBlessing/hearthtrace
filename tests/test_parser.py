@@ -360,10 +360,10 @@ def test_parse_log_tracks_a_real_weapons_durability() -> None:
     turn4 = next(t for t in game.turns if t.number == 4)
     turn6 = next(t for t in game.turns if t.number == 6)
 
-    equip = next(a for a in turn4.actions if "Dagger Mastery gespielt" in a.headline)
+    equip = next(a for a in turn4.actions if "Dolchbeherrschung gespielt" in a.headline)
 
-    assert equip.effects == ["Wicked Knife ausgerüstet"]
-    assert any("Wicked Knife zerbricht" in a.effects for a in turn6.actions)
+    assert equip.effects == ["Tückisches Messer ausgerüstet"]
+    assert any("Tückisches Messer zerbricht" in a.effects for a in turn6.actions)
     assert turn4.end.opponent_weapon is not None
     assert turn4.end.opponent_weapon.attack == 1
     assert turn4.end.opponent_weapon.durability == 1  # already used once this turn
@@ -448,8 +448,8 @@ def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> No
 
     assert turn27.start.life.own_health == 23
     assert turn27.end.life.own_health == 15  # not 21 -- the missing 6 damage
-    attack = next(a for a in turn27.actions if "Copybot #2" in a.headline)
-    assert attack.headline == "Gegner: Copybot #2 (6 Angriff) → Dein Held: 21 → 15"
+    attack = next(a for a in turn27.actions if "Kopierbot #2" in a.headline)
+    assert attack.headline == "Gegner: Kopierbot #2 (6 Angriff) → Dein Held: 21 → 15"
 
 
 def test_zone_transition_line_narrates_weapon_equip_and_break() -> None:
@@ -653,28 +653,31 @@ def test_parse_log_records_play_action_with_target_mana_and_battlecry_effect() -
     game = parse_log(FIXTURE)
     turn2 = next(t for t in game.turns if t.number == 2)
 
-    play = next(a for a in turn2.actions if "Elven Archer #1 gespielt" in a.headline)
+    play = next(a for a in turn2.actions if "Elfenbogenschützin #1 gespielt" in a.headline)
 
-    assert play.headline == "Gegner: Elven Archer #1 gespielt → Ziel: Dein Held (Mana: 1 → 0)"
+    assert play.headline == "Gegner: Elfenbogenschützin #1 gespielt → Ziel: Dein Held (Mana: 1 → 0)"
     assert play.effects == ["Dein Held: 30 → 29"]
 
 
 def test_parse_log_attributes_generated_cards_to_their_source() -> None:
-    # Turn 7: Ritual of Power's effect adds two Breezling cards directly to
-    # hand (never drawn from the deck) -- they must be attributed to their
-    # source, not silently appear in the next hand snapshot as if from
-    # nowhere. Turn 11: Witch's Apprentice's battlecry does the same for
-    # Molten Blast.
+    # Turn 7: Ritual of Power's (Ritual der Macht) effect adds two Breezling
+    # (Lüftchen) cards directly to hand (never drawn from the deck) -- they
+    # must be attributed to their source, not silently appear in the next
+    # hand snapshot as if from nowhere. Turn 11: Witch's Apprentice's (Hexe
+    # in Ausbildung) battlecry does the same for Molten Blast (Geschmolzener
+    # Schlag).
     game = parse_log(FIXTURE)
     turn7 = next(t for t in game.turns if t.number == 7)
     turn11 = next(t for t in game.turns if t.number == 11)
 
-    ritual = next(a for a in turn7.actions if "Ritual of Power gespielt" in a.headline)
-    apprentice = next(a for a in turn11.actions if "Witch's Apprentice #1 gespielt" in a.headline)
+    ritual = next(a for a in turn7.actions if "Ritual der Macht gespielt" in a.headline)
+    apprentice = next(
+        a for a in turn11.actions if "Hexe in Ausbildung #1 gespielt" in a.headline
+    )
 
-    assert "Ritual of Power → erzeugt Breezling #1" in ritual.effects
-    assert "Ritual of Power → erzeugt Breezling #2" in ritual.effects
-    assert "Witch's Apprentice #1 → erzeugt Molten Blast" in apprentice.effects
+    assert "Ritual der Macht → erzeugt Lüftchen #1" in ritual.effects
+    assert "Ritual der Macht → erzeugt Lüftchen #2" in ritual.effects
+    assert "Hexe in Ausbildung #1 → erzeugt Geschmolzener Schlag" in apprentice.effects
 
 
 def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
@@ -685,10 +688,12 @@ def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
     turn4 = next(t for t in game.turns if t.number == 4)
 
     attack = next(
-        a for a in turn4.actions if "Elven Archer" in a.headline and "Angriff" in a.headline
+        a
+        for a in turn4.actions
+        if "Elfenbogenschützin" in a.headline and "Angriff" in a.headline
     )
 
-    assert attack.headline == "Gegner: Elven Archer #1 (1 Angriff) → Dein Held: 29 → 28"
+    assert attack.headline == "Gegner: Elfenbogenschützin #1 (1 Angriff) → Dein Held: 29 → 28"
     assert attack.effects == []
 
 
@@ -705,7 +710,7 @@ def test_parse_log_infers_opening_draw_from_hand_delta_not_as_an_action() -> Non
     turn3 = next(t for t in game.turns if t.number == 3)
 
     assert turn2.opening_draws == ["Gegner zieht eine Karte"]
-    assert turn3.opening_draws == ["Wailing Vapor gezogen"]
+    assert turn3.opening_draws == ["Klagender Dampf gezogen"]
     assert all("gezogen" not in a.headline and "zieht" not in a.headline for a in turn2.actions)
     assert all("gezogen" not in a.headline and "zieht" not in a.headline for a in turn3.actions)
 
@@ -720,8 +725,8 @@ def test_parse_log_numbers_identical_minions_to_tell_them_apart() -> None:
 
     names = [m.name for m in turn7.end.board.own]
 
-    assert "Soldier of Al'Akir #4" in names
-    assert "Soldier of Al'Akir #5" in names
+    assert "Soldat von Al’Akir #4" in names
+    assert "Soldat von Al’Akir #5" in names
 
 
 def test_parse_log_filters_out_stat_changes_to_entities_never_on_board() -> None:
@@ -733,18 +738,18 @@ def test_parse_log_filters_out_stat_changes_to_entities_never_on_board() -> None
     game = parse_log(FIXTURE)
     turn7 = next(t for t in game.turns if t.number == 7)
 
-    ritual = next(a for a in turn7.actions if "Ritual of Power gespielt" in a.headline)
+    ritual = next(a for a in turn7.actions if "Ritual der Macht gespielt" in a.headline)
     board_names = {m.name for m in turn7.end.board.own}
 
     assert board_names == {
-        "Wailing Vapor #1",
-        "Skywall Sentinel #1",
-        "Soldier of Al'Akir #4",
-        "Soldier of Al'Akir #5",
+        "Klagender Dampf #1",
+        "Himmelswallwächter #1",
+        "Soldat von Al’Akir #4",
+        "Soldat von Al’Akir #5",
     }
     assert not any("#1:" in e or "#2:" in e or "#3:" in e for e in ritual.effects)
-    assert "Soldier of Al'Akir #4: 1/2 → 2/2" in ritual.effects
-    assert "Soldier of Al'Akir #5 beschworen" in ritual.effects
+    assert "Soldat von Al’Akir #4: 1/2 → 2/2" in ritual.effects
+    assert "Soldat von Al’Akir #5 beschworen" in ritual.effects
 
 
 def test_parse_log_captures_effect_triggered_draw_mid_action() -> None:
@@ -755,14 +760,16 @@ def test_parse_log_captures_effect_triggered_draw_mid_action() -> None:
     game = parse_log(FIXTURE)
     turn7 = next(t for t in game.turns if t.number == 7)
 
-    attack = next(a for a in turn7.actions if "Acolyte of Pain" in a.headline)
+    attack = next(a for a in turn7.actions if "Akolyth des Schmerzes" in a.headline)
 
     assert "Gegner zieht eine Karte" in attack.effects
     # The draw is a *consequence* of the damage (Acolyte of Pain's "whenever
     # this minion takes damage, draw a card") -- effect lines must reflect
     # the order things actually happened, not incidentally the order
     # entities were first created.
-    damage_index = next(i for i, e in enumerate(attack.effects) if e.startswith("Acolyte of Pain"))
+    damage_index = next(
+        i for i, e in enumerate(attack.effects) if e.startswith("Akolyth des Schmerzes")
+    )
     draw_index = attack.effects.index("Gegner zieht eine Karte")
     assert damage_index < draw_index
 
@@ -775,7 +782,7 @@ def test_parse_log_board_snapshot_includes_taunt_keyword() -> None:
     game = parse_log(FIXTURE)
     turn7 = next(t for t in game.turns if t.number == 7)
 
-    sentinel = next(m for m in turn7.start.board.own if m.name == "Skywall Sentinel #1")
+    sentinel = next(m for m in turn7.start.board.own if m.name == "Himmelswallwächter #1")
 
     assert sentinel.attack == 1
     assert sentinel.health == 1
@@ -798,7 +805,8 @@ def test_parse_log_extracts_mulligan_choice() -> None:
     assert game.mulligan is not None
     assert game.mulligan.kept == ["CATA_565"]
     assert game.mulligan.returned == ["CORE_EX1_238", "CATA_722"]
-    assert "Skywall Sentinel" in game.turns[0].start.hand.own_cards
+    hand_names = [card.name for card in game.turns[0].start.hand.own_cards]
+    assert "Himmelswallwächter" in hand_names
 
 
 def test_parse_log_extracts_not_in_deck_card_ids() -> None:

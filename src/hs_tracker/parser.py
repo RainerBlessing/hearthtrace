@@ -101,14 +101,25 @@ class MinionState:
     attack: int
     health: int
     keywords: list[str]
+    # The card behind this display name -- e.g. for a card-info tooltip,
+    # which needs the real card (localized names/`#N` suffixes/"Unbekannte
+    # Karte" aren't reliable lookup keys). Empty for an unrevealed entity
+    # (see `_card_name`).
+    card_id: str
+
+
+@dataclass
+class HandCard:
+    name: str
+    card_id: str
 
 
 @dataclass
 class HandState:
-    # Card names for the friendly player's own hand (always fully known),
-    # and just a count for the opponent's -- their identities are hidden
-    # information the player did not have at this point in the match.
-    own_cards: list[str]
+    # The friendly player's own hand (always fully known), and just a
+    # count for the opponent's -- their identities are hidden information
+    # the player did not have at this point in the match.
+    own_cards: list[HandCard]
     opponent_count: int
 
 
@@ -123,6 +134,7 @@ class WeaponState:
     name: str
     attack: int
     durability: int
+    card_id: str
 
 
 @dataclass
@@ -336,7 +348,10 @@ def _card_name(entity: Entity, card_db: Any) -> str:
 def _hand_state(me: Player, opponent: Player, card_db: Any) -> HandState:
     own = sorted(me.in_zone(Zone.HAND), key=lambda e: e.tags.get(GameTag.ZONE_POSITION, 0))
     return HandState(
-        own_cards=[_card_name(entity, card_db) for entity in own],
+        own_cards=[
+            HandCard(name=_card_name(entity, card_db), card_id=entity.card_id or "")
+            for entity in own
+        ],
         opponent_count=sum(1 for _ in opponent.in_zone(Zone.HAND)),
     )
 
@@ -358,6 +373,7 @@ def _minion_state(entity: Entity, namer: "_InstanceNamer") -> MinionState:
         attack=entity.tags.get(GameTag.ATK, 0),
         health=health,
         keywords=_minion_keywords(entity),
+        card_id=entity.card_id or "",
     )
 
 
@@ -384,6 +400,7 @@ def _weapon_of(player: Player, card_db: Any) -> WeaponState | None:
         name=_card_name(weapon, card_db),
         attack=weapon.tags.get(GameTag.ATK, 0),
         durability=health - damage,
+        card_id=weapon.card_id or "",
     )
 
 
@@ -1355,7 +1372,9 @@ def _opening_draw_lines(previous_hand: HandState, current_hand: HandState) -> li
     `start.hand`) already reflects the post-draw hand, so the draw is
     already-known context for that turn's decisions, not one of them."""
     lines = []
-    newly_drawn = Counter(current_hand.own_cards) - Counter(previous_hand.own_cards)
+    newly_drawn = Counter(c.name for c in current_hand.own_cards) - Counter(
+        c.name for c in previous_hand.own_cards
+    )
     for card_name in sorted(newly_drawn.elements()):
         lines.append(f"{card_name} gezogen")
     opponent_drawn = current_hand.opponent_count - previous_hand.opponent_count
@@ -1461,7 +1480,7 @@ def parse_log(path: Path) -> ParsedGame:
         raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
     packet_tree = parser.games[-1]
     friendly_id = FriendlyPlayerExporter(packet_tree).export()
-    card_db, _ = load_cards()
+    card_db, _ = load_cards(locale="deDE")
 
     builder = _TurnBuilder(friendly_id, card_db)
     exporter = _SnapshotEntityTreeExporter(packet_tree, parser.player_manager, builder)
