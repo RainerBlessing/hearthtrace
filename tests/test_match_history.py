@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -190,6 +191,42 @@ def test_record_replay_source_preserves_other_entries_already_in_the_index(
 
     assert entries[first.name].game_index == 1
     assert entries[second.name].game_index == 2
+
+
+def test_record_replay_source_leaves_no_leftover_temp_file(tmp_path: Path) -> None:
+    export_dir = tmp_path
+    state_dir = tmp_path / "state"
+    export_path = _write_export(export_dir, "2026-09-07_13-32-33_WON.md", "SHAMAN", "SHAMAN", [1])
+
+    record_replay_source(state_dir, export_path, tmp_path / "Power.log", game_index=1)
+
+    assert sorted(p.name for p in state_dir.iterdir()) == ["replay_index.json"]
+
+
+def test_load_match_history_survives_a_malformed_index_entry(tmp_path: Path) -> None:
+    # Code-review-caught bug: a partial write, a hand edit, or a future
+    # schema change could leave one entry in replay_index.json missing a
+    # key -- that must cost only that one row its replay link, not raise
+    # and (via `_refresh_history_list`'s broad except) take the entire
+    # Verlauf list down with it.
+    export_dir = tmp_path
+    state_dir = tmp_path / "state"
+    good = _write_export(export_dir, "2026-09-07_12-45-26_WON.md", "SHAMAN", "SHAMAN", [1])
+    bad = _write_export(export_dir, "2026-09-07_13-32-33_WON.md", "SHAMAN", "SHAMAN", [1])
+    log_path = tmp_path / "Power.log"
+    record_replay_source(state_dir, good, log_path, game_index=1)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    index_path = state_dir / "replay_index.json"
+    index = json.loads(index_path.read_text())
+    index[bad.name] = {"log_path": str(log_path)}  # missing game_index
+    index_path.write_text(json.dumps(index))
+
+    entries = {e.path.name: e for e in load_match_history(export_dir, state_dir=state_dir)}
+
+    assert len(entries) == 2
+    assert entries[good.name].game_index == 1
+    assert entries[bad.name].game_index is None
+    assert entries[bad.name].log_path is None
 
 
 def test_display_class_spaces_out_the_two_compound_class_names() -> None:

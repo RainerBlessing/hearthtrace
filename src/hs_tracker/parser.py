@@ -45,16 +45,28 @@ def _is_deathrattle_trigger(block: Any) -> bool:
 def _is_merge_only_block(block: Any) -> bool:
     return block.type == BlockType.DEATHS or _is_deathrattle_trigger(block)
 
+# Public (not module-private) since card_info.py's own printed-keyword
+# list reuses the labels for the subset of keywords both modules track,
+# so a wording fix only has to happen in one place -- same reasoning
+# markdown_export.RESULT_LABELS was made public for.
+KEYWORD_LABELS: dict[str, str] = {
+    "taunt": "Spott",
+    "divine_shield": "Göttlicher Schild",
+    "frozen": "Eingefroren",
+    "stealth": "Getarnt",
+    "windfury": "Windfury",
+}
+
 # (GameTag, German label) for the minion keywords worth surfacing in a board
 # snapshot. Not exhaustive -- only the ones that commonly change a decision
 # (per the user's own guidance: "nicht jeder interne Hearthstone-State muss
 # exportiert werden").
 _KEYWORD_TAGS: list[tuple[GameTag, str]] = [
-    (GameTag.TAUNT, "Spott"),
-    (GameTag.DIVINE_SHIELD, "Göttlicher Schild"),
-    (GameTag.FROZEN, "Eingefroren"),
-    (GameTag.STEALTH, "Getarnt"),
-    (GameTag.WINDFURY, "Windfury"),
+    (GameTag.TAUNT, KEYWORD_LABELS["taunt"]),
+    (GameTag.DIVINE_SHIELD, KEYWORD_LABELS["divine_shield"]),
+    (GameTag.FROZEN, KEYWORD_LABELS["frozen"]),
+    (GameTag.STEALTH, KEYWORD_LABELS["stealth"]),
+    (GameTag.WINDFURY, KEYWORD_LABELS["windfury"]),
 ]
 
 
@@ -1493,12 +1505,12 @@ def _read_lines_between(path: Path, start: int, end: int | None) -> list[str]:
     return lines
 
 
-def _parse_lines(lines: list[str], game_index: int) -> ParsedGame:
+def _parse_lines(lines: list[str], game_index: int, source: str) -> ParsedGame:
     parser = LogParser()
     log_truncated = _read_log_leniently(parser, lines)
 
     if not parser.games:
-        raise NoGameFoundError("No CREATE_GAME found in the given lines")
+        raise NoGameFoundError(f"No CREATE_GAME found in log: {source}")
     packet_tree = parser.games[-1]
     friendly_id = FriendlyPlayerExporter(packet_tree).export()
     card_db, _ = load_cards(locale="deDE")
@@ -1532,7 +1544,7 @@ def parse_log(path: Path) -> ParsedGame:
     game_count, lines = _split_last_game(path)
     if game_count == 0:
         raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
-    return _parse_lines(lines, game_index=game_count)
+    return _parse_lines(lines, game_index=game_count, source=str(path))
 
 
 def parse_log_at_index(path: Path, game_index: int) -> ParsedGame:
@@ -1550,4 +1562,4 @@ def parse_log_at_index(path: Path, game_index: int) -> ParsedGame:
     start = offsets[game_index - 1]
     end = offsets[game_index] if game_index < len(offsets) else None
     lines = _read_lines_between(path, start, end)
-    return _parse_lines(lines, game_index=game_index)
+    return _parse_lines(lines, game_index=game_index, source=f"{path} (match #{game_index})")

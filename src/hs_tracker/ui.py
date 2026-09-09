@@ -113,6 +113,8 @@ def _card_tooltip_markup(info: CardInfo) -> str:
         stats.append(f"{info.cost} Mana")
     if info.attack is not None and info.health is not None:
         stats.append(f"{info.attack}/{info.health}")
+    elif info.health is not None:  # a Location's durability -- no attack value
+        stats.append(str(info.health))
     if info.type_label:
         stats.append(info.type_label)
     if info.rarity_label:
@@ -151,6 +153,13 @@ class TrackerWindow(Adw.ApplicationWindow):
         # dataset (the same one parser.py/markdown_export.py load), so
         # re-loading it every 2s would be pure waste.
         self._card_db, _ = load_cards(locale="deDE")
+        # A card's tooltip markup is a pure function of (card_id,
+        # self._card_db), and self._card_db never changes for the life of
+        # this window -- caching it here avoids recomputing the same
+        # card_info() lookup and markup string on every single Replay
+        # re-render (every ~2s poll tick while following the live match,
+        # on top of every turn/stage navigation).
+        self._card_tooltip_markup_cache: dict[str, str] = {}
         # The most recently parsed game and which of its turns Replay is
         # currently showing -- kept independent of `_last_log_path`/
         # `_last_log_mtime` (which gate *whether* to re-parse) since Replay
@@ -793,7 +802,10 @@ class TrackerWindow(Adw.ApplicationWindow):
         per-card chips, so there's nothing to attach a tooltip to."""
         if not card_id:
             return
-        markup = _card_tooltip_markup(card_info(card_id, self._card_db))
+        markup = self._card_tooltip_markup_cache.get(card_id)
+        if markup is None:
+            markup = _card_tooltip_markup(card_info(card_id, self._card_db))
+            self._card_tooltip_markup_cache[card_id] = markup
         widget.set_tooltip_markup(markup)
 
         label = Gtk.Label(label=markup, use_markup=True, wrap=True)

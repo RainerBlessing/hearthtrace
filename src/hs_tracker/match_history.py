@@ -106,7 +106,14 @@ def record_replay_source(
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index = _load_replay_index(state_dir)
     index[export_path.name] = {"log_path": str(log_path), "game_index": game_index}
-    index_path.write_text(json.dumps(index))
+    # Write-then-rename, not a direct write_text: a crash/power loss mid-
+    # write must not leave the whole index (every past match's replay
+    # link, not just the one being added) truncated or invalid. os.replace
+    # is atomic on the same filesystem, which a sibling temp file always
+    # is.
+    tmp_path = index_path.with_suffix(index_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(index))
+    tmp_path.replace(index_path)
 
 
 def _load_replay_index(state_dir: Path) -> dict[str, dict[str, Any]]:
@@ -115,6 +122,22 @@ def _load_replay_index(state_dir: Path) -> dict[str, dict[str, Any]]:
     except (OSError, json.JSONDecodeError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _replay_source_fields(source: dict[str, Any] | None) -> tuple[Path | None, int | None]:
+    """Pulls (log_path, game_index) out of one index entry, or (None,
+    None) if it's missing or malformed (a partial write, a hand edit, a
+    future schema change) -- one bad entry must only cost *that* row its
+    replay link, not raise and take the whole Verlauf list down with it
+    (`_refresh_history_list`'s except would otherwise replace every past
+    match with a bare error message over a single corrupt row)."""
+    if source is None:
+        return None, None
+    log_path = source.get("log_path")
+    game_index = source.get("game_index")
+    if not isinstance(log_path, str) or not isinstance(game_index, int):
+        return None, None
+    return Path(log_path), game_index
 
 
 def load_match_history(export_dir: Path, state_dir: Path | None = None) -> list[MatchHistoryEntry]:
@@ -146,9 +169,9 @@ def load_match_history(export_dir: Path, state_dir: Path | None = None) -> list[
         if entry is None:
             continue
         source = replay_index.get(path.name)
-        if source is not None:
-            entry.log_path = Path(source["log_path"])
-            entry.game_index = source["game_index"]
+        log_path, game_index = _replay_source_fields(source)
+        entry.log_path = log_path
+        entry.game_index = game_index
         entries.append(entry)
     entries.sort(key=lambda entry: entry.when, reverse=True)
     return entries

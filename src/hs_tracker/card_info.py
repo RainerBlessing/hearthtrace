@@ -13,6 +13,8 @@ from typing import Any
 
 from hearthstone.enums import CardType, Rarity
 
+from hs_tracker.parser import KEYWORD_LABELS
+
 _TYPE_LABELS: dict[CardType, str] = {
     CardType.MINION: "Diener",
     CardType.SPELL: "Zauber",
@@ -36,14 +38,17 @@ _RARITY_LABELS: dict[Rarity, str] = {
 # already spells them out verbatim ("<b>Kampfschrei:</b> ...") -- a
 # separate chip would just repeat that. A broader set than parser.py's
 # `_KEYWORD_TAGS` (which only lists what's worth showing on a live board
-# frame: Taunt/Divine Shield/Frozen/Stealth/Windfury). Attribute names are
-# exactly what `hearthstone.cardxml`'s `Card` exposes; Charge and Stealth
-# aren't separate attributes there (Charge no longer exists as a keyword,
-# Stealth lives only in runtime tags), so they're not listed here.
+# frame: Taunt/Divine Shield/Frozen/Stealth/Windfury) -- the three labels
+# that do overlap come from the same `KEYWORD_LABELS` parser.py uses, so
+# a wording fix can't apply to only one of the two views. Attribute names
+# are exactly what `hearthstone.cardxml`'s `Card` exposes; Charge and
+# Stealth aren't separate attributes there (Charge no longer exists as a
+# keyword, Stealth lives only in runtime tags), so they're not listed
+# here.
 _KEYWORD_ATTRS: list[tuple[str, str]] = [
-    ("taunt", "Spott"),
-    ("divine_shield", "Göttlicher Schild"),
-    ("windfury", "Windfury"),
+    ("taunt", KEYWORD_LABELS["taunt"]),
+    ("divine_shield", KEYWORD_LABELS["divine_shield"]),
+    ("windfury", KEYWORD_LABELS["windfury"]),
     ("rush", "Ansturm"),
     ("poisonous", "Giftig"),
     ("lifesteal", "Lebensraub"),
@@ -99,14 +104,22 @@ def _keywords_of(card: Any) -> list[str]:
     return [label for attr, label in _KEYWORD_ATTRS if getattr(card, attr, False)]
 
 
+_STATS_CARD_TYPES = (CardType.MINION, CardType.WEAPON, CardType.LOCATION)
+
+
 def card_info(card_id: str, card_db: Any) -> CardInfo:
     """Looks up `card_id` in `card_db` (as returned by
-    `hearthstone.cardxml.load`). Never raises -- an empty/unresolvable
-    card_id (an entity that hasn't been revealed yet) degrades to a
-    contentless "Unbekannte Karte" instead, so a tooltip can be attempted
-    unconditionally without the caller needing to check first."""
-    card = card_db.get(card_id) if card_id else None
-    if card is None:
+    `hearthstone.cardxml.load`). Never raises.
+
+    Two distinct "don't know" cases, matching `parser._card_name`'s own
+    distinction for the exact same lookup (so a card's board/hand chip
+    label and its tooltip never disagree): no `card_id` at all (an
+    entity that hasn't been revealed yet) falls back to a contentless
+    "Unbekannte Karte", while a `card_id` the local card_db just doesn't
+    have an entry for falls back to showing that id as the name, same as
+    the chip already does.
+    """
+    if not card_id:
         return CardInfo(
             name=_UNKNOWN_CARD_NAME,
             type_label="",
@@ -117,18 +130,32 @@ def card_info(card_id: str, card_db: Any) -> CardInfo:
             keywords=[],
             text="",
         )
+    card = card_db.get(card_id)
+    if card is None:
+        return CardInfo(
+            name=card_id,
+            type_label="",
+            cost=None,
+            attack=None,
+            health=None,
+            rarity_label=None,
+            keywords=[],
+            text="",
+        )
 
-    # A weapon's durability is printed into `.health`, not `.durability`
-    # (always 0, unused in this data) -- the same HEALTH/DAMAGE pair the
-    # live parser already reads for the exact same reason (see
-    # `parser._weapon_of`).
-    health = card.health if card.type in (CardType.MINION, CardType.WEAPON) else None
+    # A weapon's or location's durability is printed into `.health`, not
+    # `.durability` (always 0, unused in this data) -- the same HEALTH/
+    # DAMAGE pair the live parser already reads for a weapon, for the
+    # exact same reason (see `parser._weapon_of`). Locations have no
+    # attack value at all, unlike weapons/minions.
+    health = card.health if card.type in _STATS_CARD_TYPES else None
+    attack = card.atk if card.type in (CardType.MINION, CardType.WEAPON) else None
 
     return CardInfo(
         name=card.name,
         type_label=_TYPE_LABELS.get(card.type, ""),
         cost=card.cost,
-        attack=card.atk if card.type in (CardType.MINION, CardType.WEAPON) else None,
+        attack=attack,
         health=health,
         rarity_label=_RARITY_LABELS.get(card.rarity),
         keywords=_keywords_of(card),

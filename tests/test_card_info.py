@@ -42,15 +42,41 @@ def test_card_info_reads_printed_keywords_and_bold_markup() -> None:
     assert "<b>Kampfschrei:</b>" in info.text
 
 
-def test_card_info_falls_back_for_an_unknown_card_id() -> None:
-    # An empty/unresolvable card_id happens for a not-yet-revealed entity
-    # (e.g. `_card_name`'s "Unbekannte Karte" case) -- must degrade
-    # gracefully, not raise, so a tooltip can still be attempted safely.
+def test_card_info_falls_back_for_an_empty_card_id() -> None:
+    # No card_id at all happens for a not-yet-revealed entity -- must
+    # degrade gracefully, not raise, so a tooltip can still be attempted
+    # unconditionally.
     info = card_info("", _CARD_DB)
 
     assert info.name == "Unbekannte Karte"
     assert info.text == ""
     assert info.cost is None
+
+
+def test_card_info_falls_back_to_the_raw_id_for_an_unresolvable_card_id() -> None:
+    # Code-review-caught inconsistency: a card_id the local card_db has no
+    # entry for (as opposed to no card_id at all) must fall back the same
+    # way `parser._card_name` already does for the exact same lookup --
+    # showing the raw id, not the generic "Unbekannte Karte" -- or a
+    # card's board/hand chip label and its tooltip could disagree.
+    info = card_info("NOT_A_REAL_CARD_ID", _CARD_DB)
+
+    assert info.name == "NOT_A_REAL_CARD_ID"
+    assert info.text == ""
+    assert info.cost is None
+
+
+def test_card_info_reads_a_locations_durability_from_the_same_health_field() -> None:
+    # Code-review-caught gap: a Location's durability lives in the same
+    # HEALTH field as a weapon's (verified against the real card
+    # database: CATA_301 has health=3, durability=0, the unused field) --
+    # card_info only special-cased minions/weapons for this, silently
+    # dropping a Location's durability from its tooltip.
+    info = card_info("CATA_301", _CARD_DB)  # Rubinsanktum (Ruby Sanctum)
+
+    assert info.type_label == "Ort"
+    assert info.health == 3
+    assert info.attack is None  # Locations have no attack value at all
 
 
 def test_sanitize_description_replaces_stray_underscore_spacing() -> None:
