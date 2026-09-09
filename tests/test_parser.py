@@ -33,6 +33,7 @@ from hs_tracker.parser import (
     _weapon_of,
     _zone_transition_line,
     parse_log,
+    parse_log_at_index,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_match.power.log"
@@ -431,6 +432,36 @@ def test_parse_log_handles_a_third_match_after_a_players_role_flips() -> None:
     assert game.own_class == "SHAMAN"
     assert game.opponent_class == "SHAMAN"
     assert len(game.turns) > 0
+
+
+def test_parse_log_at_index_reopens_an_earlier_match_in_the_same_session() -> None:
+    # MULTI_GAME_FIXTURE holds two matches back to back; parse_log always
+    # reaches only the second (still in progress, 3 turns). Reopening the
+    # *first* one -- the real scenario for a Verlauf entry whose match
+    # finished before later ones were played in the same session log --
+    # must recover the complete 17-turn WON match, not the second one.
+    #
+    # This also regression-tests a real bug caught while writing this
+    # function: reading the requested match's lines via
+    # `f.read(end - start)` (a byte-count difference between two text-mode
+    # `tell()` cookies, which aren't byte offsets) silently truncated the
+    # last line whenever the file had multi-byte UTF-8 content -- which a
+    # German-locale log always does (umlauts, "Al'Akir"'s typographic
+    # apostrophe, ...).
+    game = parse_log_at_index(MULTI_GAME_FIXTURE, game_index=1)
+
+    assert game.game_index == 1
+    assert game.result == "WON"
+    assert game.own_class == "SHAMAN"
+    assert game.opponent_class == "WARLOCK"
+    assert len(game.turns) == 17
+
+
+def test_parse_log_at_index_rejects_an_out_of_range_index() -> None:
+    with pytest.raises(NoGameFoundError):
+        parse_log_at_index(MULTI_GAME_FIXTURE, game_index=3)
+    with pytest.raises(NoGameFoundError):
+        parse_log_at_index(MULTI_GAME_FIXTURE, game_index=0)
 
 
 def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:

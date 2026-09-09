@@ -1441,43 +1441,64 @@ def _split_last_game(path: Path) -> tuple[int, list[str]]:
     raised on the third. Feeding the parser only one match's lines at a
     time -- a fresh `PlayerManager` each call -- sidesteps this entirely.
 
-    Streams the file twice rather than materializing it whole: once to
-    count matches and find where the last one starts (constant memory --
-    `f.tell()` between `readline()` calls, not `for line in f`, which
-    disables `tell()` mid-iteration), then a second read of only *that*
-    match's lines, not the whole session. A long session log can hold many
-    finished matches by the time this runs on every ~2s poll of the
-    current one; only the last match's line count should scale that cost,
-    not the whole session's.
+    Streams the file rather than materializing it whole (constant memory
+    -- `f.tell()` between `readline()` calls, not `for line in f`, which
+    disables `tell()` mid-iteration), then a second, targeted read of only
+    the requested match's lines, not the whole session. A long session log
+    can hold many finished matches by the time this runs on every ~2s poll
+    of the current one; only the requested match's line count should scale
+    that cost, not the whole session's.
     """
-    game_count = 0
-    last_game_offset: int | None = None
+    offsets = _find_game_offsets(path)
+    if not offsets:
+        return 0, []
+    return len(offsets), _read_lines_between(path, offsets[-1], None)
+
+
+def _find_game_offsets(path: Path) -> list[int]:
+    """Byte offsets where each CREATE_GAME marker line starts, in file
+    order -- shared by `_split_last_game` (the newest match) and
+    `parse_log_at_index` (an arbitrary past one, e.g. reopening a match
+    from history in Replay after later matches have already been played
+    in the same session log)."""
+    offsets: list[int] = []
     with path.open() as f:
         offset = f.tell()
         line = f.readline()
         while line:
             if _CREATE_GAME_MARKER in line:
-                game_count += 1
-                last_game_offset = offset
+                offsets.append(offset)
             offset = f.tell()
             line = f.readline()
-    if last_game_offset is None:
-        return 0, []
+    return offsets
+
+
+def _read_lines_between(path: Path, start: int, end: int | None) -> list[str]:
+    # Deliberately not `f.read(end - start)`: `tell()` on a text-mode file
+    # returns an opaque cookie, not a byte count -- subtracting two of them
+    # and passing that as a *character* count to `read()` silently
+    # misaligns (and can cut a line mid-way) the moment the file has any
+    # multi-byte UTF-8 content, which German card/player names always do.
+    # Comparing `tell()` against `end` (itself a `tell()` value, from
+    # `_find_game_offsets`) is the only arithmetic-free, safe use of it.
+    lines: list[str] = []
     with path.open() as f:
-        f.seek(last_game_offset)
-        return game_count, f.readlines()
+        f.seek(start)
+        line = f.readline()
+        while line:
+            lines.append(line)
+            if end is not None and f.tell() >= end:
+                break
+            line = f.readline()
+    return lines
 
 
-def parse_log(path: Path) -> ParsedGame:
-    game_count, lines = _split_last_game(path)
-    if game_count == 0:
-        raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
-
+def _parse_lines(lines: list[str], game_index: int) -> ParsedGame:
     parser = LogParser()
     log_truncated = _read_log_leniently(parser, lines)
 
     if not parser.games:
-        raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
+        raise NoGameFoundError("No CREATE_GAME found in the given lines")
     packet_tree = parser.games[-1]
     friendly_id = FriendlyPlayerExporter(packet_tree).export()
     card_db, _ = load_cards(locale="deDE")
@@ -1500,8 +1521,33 @@ def parse_log(path: Path) -> ParsedGame:
         starting_deck=me.known_starting_deck_list,
         result=_result_for(me),
         drawn_card_ids=not_in_deck,
-        game_index=game_count,
+        game_index=game_index,
         mulligan=mulligan,
         turns=builder.turns,
         log_truncated=log_truncated,
     )
+
+
+def parse_log(path: Path) -> ParsedGame:
+    game_count, lines = _split_last_game(path)
+    if game_count == 0:
+        raise NoGameFoundError(f"No CREATE_GAME found in log: {path}")
+    return _parse_lines(lines, game_index=game_count)
+
+
+def parse_log_at_index(path: Path, game_index: int) -> ParsedGame:
+    """Like `parse_log`, but for a specific match within a multi-match
+    session log (1-based, matching `ParsedGame.game_index`) instead of
+    always the newest -- used to reopen a *past* match for Replay from a
+    Verlauf entry, once later matches have already been played in the
+    same session log and `parse_log` would only ever reach the newest of
+    them."""
+    offsets = _find_game_offsets(path)
+    if game_index < 1 or game_index > len(offsets):
+        raise NoGameFoundError(
+            f"Match #{game_index} not found in log: {path} (has {len(offsets)} matches)"
+        )
+    start = offsets[game_index - 1]
+    end = offsets[game_index] if game_index < len(offsets) else None
+    lines = _read_lines_between(path, start, end)
+    return _parse_lines(lines, game_index=game_index)

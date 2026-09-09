@@ -7,6 +7,7 @@ from hs_tracker.match_history import (
     _display_class,
     format_history_row,
     load_match_history,
+    record_replay_source,
 )
 from hs_tracker.parser import (
     BoardState,
@@ -132,6 +133,63 @@ def test_load_match_history_returns_empty_list_when_export_dir_is_missing(tmp_pa
     entries = load_match_history(tmp_path / "does-not-exist")
 
     assert entries == []
+
+
+def test_load_match_history_fills_in_the_replay_link_when_recorded(tmp_path: Path) -> None:
+    export_dir = tmp_path
+    state_dir = tmp_path / "state"
+    export_path = _write_export(
+        export_dir, "2026-09-07_13-32-33_WON.md", "SHAMAN", "DEATHKNIGHT", [1, 22]
+    )
+    log_path = tmp_path / "Power.log"
+    record_replay_source(state_dir, export_path, log_path, game_index=3)
+
+    entries = load_match_history(export_dir, state_dir=state_dir)
+
+    assert len(entries) == 1
+    assert entries[0].log_path == log_path
+    assert entries[0].game_index == 3
+
+
+def test_load_match_history_leaves_replay_link_unset_without_an_index_entry(
+    tmp_path: Path,
+) -> None:
+    export_dir = tmp_path
+    state_dir = tmp_path / "state"
+    _write_export(export_dir, "2026-09-07_13-32-33_WON.md", "SHAMAN", "DEATHKNIGHT", [1, 22])
+
+    entries = load_match_history(export_dir, state_dir=state_dir)
+
+    assert entries[0].log_path is None
+    assert entries[0].game_index is None
+
+
+def test_load_match_history_ignores_a_missing_state_dir(tmp_path: Path) -> None:
+    export_dir = tmp_path
+    _write_export(export_dir, "2026-09-07_13-32-33_WON.md", "SHAMAN", "DEATHKNIGHT", [1, 22])
+
+    entries = load_match_history(export_dir, state_dir=tmp_path / "does-not-exist")
+
+    assert entries[0].log_path is None
+
+
+def test_record_replay_source_preserves_other_entries_already_in_the_index(
+    tmp_path: Path,
+) -> None:
+    export_dir = tmp_path
+    state_dir = tmp_path / "state"
+    first = _write_export(export_dir, "2026-09-07_12-45-26_WON.md", "SHAMAN", "SHAMAN", [1])
+    second = _write_export(
+        export_dir, "2026-09-07_13-32-33_WON.md", "SHAMAN", "DEATHKNIGHT", [1]
+    )
+    log_path = tmp_path / "Power.log"
+    record_replay_source(state_dir, first, log_path, game_index=1)
+    record_replay_source(state_dir, second, log_path, game_index=2)
+
+    entries = {e.path.name: e for e in load_match_history(export_dir, state_dir=state_dir)}
+
+    assert entries[first.name].game_index == 1
+    assert entries[second.name].game_index == 2
 
 
 def test_display_class_spaces_out_the_two_compound_class_names() -> None:
