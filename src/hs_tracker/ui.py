@@ -1,6 +1,7 @@
 """The live deck-list window."""
 
 import sys
+from html import escape
 from pathlib import Path
 
 import gi
@@ -10,6 +11,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, GObject, Gtk  # noqa: E402
 from hearthstone.cardxml import load as load_cards  # noqa: E402
 
+from hs_tracker.card_info import CardInfo, card_info  # noqa: E402
 from hs_tracker.config import Config  # noqa: E402
 from hs_tracker.deck_state import remaining_deck  # noqa: E402
 from hs_tracker.log_reader import find_latest_power_log  # noqa: E402
@@ -91,6 +93,31 @@ def _install_replay_css() -> None:
         Gtk.StyleContext.add_provider_for_display(
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+
+
+def _card_tooltip_markup(info: CardInfo) -> str:
+    # `info.text` is already sanitized into valid Pango markup (its own
+    # <b>/<i> tags are meant to render, not show up literally) -- every
+    # other field here is plain text and must be escaped, or a card name
+    # or keyword that happens to contain "&"/"<" would break the whole
+    # tooltip instead of just that one field.
+    lines = [f"<b>{escape(info.name)}</b>"]
+    stats = []
+    if info.cost is not None:
+        stats.append(f"{info.cost} Mana")
+    if info.attack is not None and info.health is not None:
+        stats.append(f"{info.attack}/{info.health}")
+    if info.type_label:
+        stats.append(info.type_label)
+    if info.rarity_label:
+        stats.append(info.rarity_label)
+    if stats:
+        lines.append(escape("   ".join(stats)))
+    if info.keywords:
+        lines.append(escape(", ".join(info.keywords)))
+    if info.text:
+        lines.append(info.text)
+    return "\n".join(lines)
 
 
 class TrackerWindow(Adw.ApplicationWindow):
@@ -575,18 +602,16 @@ class TrackerWindow(Adw.ApplicationWindow):
             row.append(content)
             box.append(row)
 
-    @staticmethod
-    def _build_board_flowbox(minions: list[MinionState]) -> Gtk.FlowBox:
+    def _build_board_flowbox(self, minions: list[MinionState]) -> Gtk.FlowBox:
         flow = Gtk.FlowBox()
         flow.set_selection_mode(Gtk.SelectionMode.NONE)
         flow.set_min_children_per_line(1)
         flow.set_max_children_per_line(7)  # Hearthstone's own board-size cap
         for minion in minions:
-            flow.append(TrackerWindow._build_minion_frame(minion))
+            flow.append(self._build_minion_frame(minion))
         return flow
 
-    @staticmethod
-    def _build_minion_frame(minion: MinionState) -> Gtk.Frame:
+    def _build_minion_frame(self, minion: MinionState) -> Gtk.Frame:
         # Name/stats/keywords deliberately don't share one font size: the
         # numbers (what matters for "can this trade/kill?") are the most
         # prominent, the name is de-emphasized, keywords are separate,
@@ -630,26 +655,26 @@ class TrackerWindow(Adw.ApplicationWindow):
         # keeps it at its own natural/requested width regardless of how
         # much room the row actually has.
         frame.set_halign(Gtk.Align.START)
+        self._attach_card_tooltip(frame, minion.card_id)
         return frame
 
-    @staticmethod
-    def _build_hand_flowbox(cards: list[HandCard]) -> Gtk.FlowBox:
+    def _build_hand_flowbox(self, cards: list[HandCard]) -> Gtk.FlowBox:
         flow = Gtk.FlowBox()
         flow.set_selection_mode(Gtk.SelectionMode.NONE)
         flow.set_min_children_per_line(1)
         flow.set_max_children_per_line(10)
         for card in cards:
-            flow.append(TrackerWindow._build_hand_chip(card.name))
+            flow.append(self._build_hand_chip(card.name, card.card_id))
         return flow
 
-    @staticmethod
-    def _build_hand_chip(text: str) -> Gtk.Frame:
+    def _build_hand_chip(self, text: str, card_id: str) -> Gtk.Frame:
         # Same chip shape as a keyword badge, but visually quieter (lower
         # opacity, no separate weight class) than a board minion's frame --
         # hand cards are reference information here, not the thing being
         # actively evaluated the way board state is.
         frame = TrackerWindow._build_keyword_chip(text)
         frame.set_opacity(0.8)
+        self._attach_card_tooltip(frame, card_id)
         return frame
 
     @staticmethod
@@ -667,6 +692,35 @@ class TrackerWindow(Adw.ApplicationWindow):
         # leftover space in a sparse row/hand instead of sizing to content.
         frame.set_halign(Gtk.Align.START)
         return frame
+
+    def _attach_card_tooltip(self, widget: Gtk.Widget, card_id: str) -> None:
+        """Hover shows a native GTK tooltip (built-in delay/positioning/
+        dismiss); click pins the same content open in a popover (GTK's
+        default `autohide` closes it on an outside click, matching "click
+        elsewhere to dismiss" for free). Opponent hand cards never call
+        this at all -- they're rendered as a bare count, never as
+        per-card chips, so there's nothing to attach a tooltip to."""
+        if not card_id:
+            return
+        markup = _card_tooltip_markup(card_info(card_id, self._card_db))
+        widget.set_tooltip_markup(markup)
+
+        label = Gtk.Label(label=markup, use_markup=True, wrap=True)
+        label.set_max_width_chars(40)
+        for setter in (
+            label.set_margin_top,
+            label.set_margin_bottom,
+            label.set_margin_start,
+            label.set_margin_end,
+        ):
+            setter(8)
+        popover = Gtk.Popover()
+        popover.set_child(label)
+        popover.set_parent(widget)
+        popover.set_autohide(True)
+        click = Gtk.GestureClick()
+        click.connect("released", lambda *_args: popover.popup())
+        widget.add_controller(click)
 
     @staticmethod
     def _clear_box(box: Gtk.Box) -> None:
