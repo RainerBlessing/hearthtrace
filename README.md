@@ -1,93 +1,116 @@
 # HS Tracker
 
-Nativer Linux-Begleiter für Hearthstone (gespielt über Wine/Lutris). Zeigt
-live das eigene Restdeck an und exportiert nach jedem Match automatisch eine
-Markdown-Zusammenfassung zur späteren Analyse mit einem KI-Chat.
+A native Linux Hearthstone tracker focused on replay analysis and learning
+from your games.
 
-MVP-Umfang: nur das eigene Deck (kein Opponent-Tracking, kein
-Arena/Battlegrounds/Tavern Brawl).
+Most Hearthstone deck trackers exist to answer "what's left in my deck?"
+while you're playing. HS Tracker cares about a different, slower question:
+after the match is over, what actually happened, turn by turn, and why did
+it go the way it did? It reconstructs every turn from your `Power.log` --
+board state, mana, hand, attack readiness, generated cards -- into a
+step-by-step Replay view (Start → Actions → End) you can page through, and
+exports a clean, deterministic Markdown summary of the whole match for
+further analysis (e.g. pasting into an AI chat) or your own tooling.
 
-## Voraussetzungen
+It's aimed at:
+- **Linux Hearthstone players** who'd rather not run HDT under Wine/Proton
+  or install Overwolf.
+- **Players who want to actually get better**, not just see a decklist
+  while playing -- reviewing a reconstructed match has already surfaced
+  real, concrete mistakes (unused attacks, bad Secret sequencing, AoE
+  timed a turn late) and even a few bugs in the tracker itself, each time
+  traceable back to the exact turn.
+- **Developers and power users** who want an open, `Power.log`-based match
+  dataset/export for their own analysis, statistics, or tooling, rather
+  than a closed companion app.
 
-- Hearthstone läuft unter Wine (z. B. via Lutris) und schreibt ein
-  `Power.log` (siehe `docs/plans/2026-09-06-hs-tracker-design.md`,
-  Abschnitt "Log-Zugriff unter Wine", falls das noch nicht eingerichtet ist).
-- Python-Umgebung mit den Projektabhängigkeiten installiert:
+MVP scope: your own side of the match only (no opponent deck tracking, no
+Arena/Battlegrounds/Tavern Brawl). The app's own UI text is German.
+
+## What it does
+
+- **Live tracking**: your remaining deck, updated as you draw and play.
+- **Replay**: page through every turn of a finished match with three
+  stages per turn -- **Start** (the full decision-relevant state: mana,
+  hero health/armor, your hand, both boards with attack/health and
+  keywords like Taunt/Divine Shield), **Actions** (a numbered event list:
+  cards and hero powers played with mana cost and spell target, attacks
+  with their result, mid-turn draws, generated cards with their source,
+  your own Discover picks), and **End** (mana/health/board only, since
+  hand/armor changes already showed up in Actions). Same-name minions get
+  a stable `#N` tag so you can tell copies apart across the whole match;
+  a transformed minion (Polymorph, Hex, ...) keeps its combat history
+  (summoning sickness, an already-used attack) across the transform,
+  showing both its old and new identity. Hover or click a card for its
+  full text, cost, stats, and keywords.
+- **History**: every past match, one line each, linked back to its
+  Replay -- click a row to reopen that exact match, even if newer matches
+  have been played since.
+- **Markdown export**: written automatically once a match ends, one file
+  per match, human-readable and ready to paste into a chat or feed to
+  your own scripts.
+
+## Requirements
+
+- Hearthstone running under Wine (e.g. via Lutris) with `Power.log`
+  enabled (`log.config`, `[Power]` section: `FilePrinting=True`,
+  `Verbose=True`). The app checks this at startup and, if Hearthstone's
+  own 10MB log size limit is still active, offers to disable it for you
+  (a full log is needed to reconstruct a whole match -- once Hearthstone
+  hits that limit it stops writing to the file entirely, silently losing
+  the rest of whatever match was in progress).
+- A Python environment with the project's dependencies installed:
   ```bash
   cd hs-tracker
   python -m venv .venv
   .venv/bin/pip install -e ".[dev]"
   ```
 
-## Konfiguration
+## Configuration
 
-Beim ersten Start legt der Tracker automatisch eine Vorlage unter
-`~/.config/hs-tracker/config.toml` an und beendet sich mit einem Hinweis,
-den Pfad einzutragen:
+On first launch, the tracker writes a template to
+`~/.config/hs-tracker/config.toml` and exits with a note to fill it in:
 
 ```toml
-logs_dir = "/pfad/zum/Logs-ordner"
+logs_dir = "/path/to/your/Logs/folder"
 export_dir = "~/HearthstoneAnalysis"
 ```
 
-- `logs_dir`: der Ordner, der die `Hearthstone_*`-Session-Unterordner
-  enthält (kann auf einem beliebigen Wine-Laufwerk/Mountpoint liegen).
-- `export_dir`: wohin die Markdown-Zusammenfassungen geschrieben werden.
+- `logs_dir`: the folder containing the `Hearthstone_*` session
+  subfolders (can live on any Wine drive/mountpoint).
+- `export_dir`: where the Markdown match summaries get written.
 
-## Markdown-Zusammenfassungen generieren lassen
+## Usage
 
-1. **Hearthstone starten** (wie gewohnt über Lutris).
-2. **HS Tracker starten** — entweder direkt:
+1. **Start Hearthstone** as usual (e.g. via Lutris).
+2. **Start HS Tracker** -- either directly:
    ```bash
    cd hs-tracker
    .venv/bin/python -m hs_tracker.app
    ```
-   oder als Desktop-Eintrag installieren, damit er im App-Launcher
-   auftaucht (den `Exec=`-Pfad in `hs-tracker.desktop` vorher auf den
-   eigenen Installationspfad anpassen):
+   or install it as a desktop entry so it shows up in your app launcher
+   (edit the `Exec=` path in `hs-tracker.desktop` to your own install
+   path first):
    ```bash
    cp hs-tracker.desktop ~/.local/share/applications/
    ```
-   Die Reihenfolge (Hearthstone zuerst oder Tracker zuerst) ist egal — der
-   Tracker pollt den Log-Ordner und findet die aktuelle Session automatisch.
-3. **Einfach spielen.** Sobald ein Match endet (Sieg, Niederlage,
-   Unentschieden oder Aufgabe), erkennt der Tracker das automatisch am
-   `PLAYSTATE`-Tag im Log.
-4. **Ergebnis:** Eine Datei landet automatisch — ohne Benachrichtigung —
-   unter `export_dir`:
+   The order (Hearthstone first or the tracker first) doesn't matter --
+   the tracker polls the log folder and picks up the current session
+   automatically.
+3. **Just play.** Once a match ends (win, loss, tie, or concede), the
+   tracker detects it automatically from the log's `PLAYSTATE` tag.
+4. **Result:** a file appears automatically -- no notification -- under
+   `export_dir`:
    ```
-   ~/HearthstoneAnalysis/<Datum>_<Uhrzeit>_<ERGEBNIS>.md
+   ~/HearthstoneAnalysis/<date>_<time>_<RESULT>.md
    ```
-   z. B. `2026-09-07_20-15-30_WON.md`. Diese Datei kann direkt in einen
-   Claude-Chat eingefügt werden, um die Partie analysieren zu lassen.
-   Enthalten sind Ergebnis, Klassen, Deck (bzw. "Bekannte Deck-Karten",
-   solange nicht alle 30 gesehen wurden), Mulligan (behalten/zurückgelegt)
-   und Restdeck bei Spielende, sowie pro Zug:
-   - **Zugbeginn**: der automatische Kartenzug dieses Zugs (falls einer
-     stattfand) — steht separat oberhalb von Start, nicht als Aktion, da
-     `Start` die Hand bereits danach zeigt.
-   - **Start**: vollständiger Entscheidungszustand — Mana (verfügbar/
-     Maximum/gesperrt/Überladen), Heldenleben & Rüstung, eigene Hand
-     (Gegner nur als Kartenanzahl — verdeckte Information wird nie
-     aufgedeckt), Board beider Seiten (Angriff/Leben, relevante Zustände
-     wie Spott/Göttlicher Schild). Gleichnamige Diener bekommen eine
-     stabile `#N`-Kennung, um sie über den Zug hinweg auseinanderzuhalten;
-     bei Transformationen (Hex, Verwandlung, …) wird sowohl die
-     ursprüngliche als auch die neue Identität genannt.
-   - **Aktionen**: nummerierte Ereignisliste — Karten/Heldenkräfte mit
-     Mana-Verbrauch und Zauberziel, gerichtete Angriffe mit Ergebnis,
-     Kartenziehen durch Effekte mitten im Zug, generierte Karten mit
-     Quellenangabe (z. B. "Karte X → erzeugt Karte Y") und eigene
-     Discover-Auswahlen (angebotene Karten + Wahl — beim Gegner
-     naturgemäß nicht sichtbar).
-   - **Ende**: bewusst schlank — nur Mana/Heldenleben/Board, da Hand- und
-     Rüstungsänderungen schon in den Aktionen stehen.
+   e.g. `2026-09-07_20-15-30_WON.md`.
 
-**Hinweis:** Der Tracker muss während des Matches laufen, da live aus dem
-Log gelesen wird — ein nachträglicher Export aus einem alten `Power.log`
-ist über die App aktuell nicht vorgesehen.
+**Note:** the tracker needs to be running during the match, since it
+reads live from the log -- exporting after the fact from an old
+`Power.log` isn't currently supported by the app itself.
 
-## Entwicklung
+## Development
 
 ```bash
 .venv/bin/pytest --cov=src/hs_tracker --cov-report=term-missing
@@ -95,5 +118,3 @@ ist über die App aktuell nicht vorgesehen.
 .venv/bin/mypy src
 .venv/bin/radon cc src -a -nb
 ```
-
-Design und Implementierungsplan liegen unter `docs/plans/`.
