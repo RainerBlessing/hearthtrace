@@ -1,13 +1,13 @@
 aniso8601==10.0.1
-ast_serialize==0.9.0
+ast_serialize==0.11.1
 certifi==2026.7.22
 charset-normalizer==3.5.1
 colorama==0.4.6
 coverage==7.16.0
 hearthstone==9.20.12
-hearthstone-data==251332.1
-# Editable Git install with no remote (hs-tracker==0.1.0)
--e /home/rainer/projects/hs-tracker
+hearthstone-data==251951.1
+# Editable Git install with no remote (hearthtrace==0.1.0)
+-e /home/rainer/projects/hearthtrace
 hslog==1.20.0
 idna==3.19
 iniconfig==2.3.0
@@ -25,7 +25,7 @@ pytest==9.1.1
 pytest-cov==7.1.0
 radon==6.0.1
 requests==2.34.2
-ruff==0.16.6
+ruff==0.16.7
 six==1.17.0
 typing_extensions==4.16.0
 urllib3==2.7.0

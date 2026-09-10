@@ -1,6 +1,6 @@
 from hearthstone.cardxml import load as load_cards
 
-from hs_tracker.card_info import CardInfo, card_info, sanitize_description
+from hearthtrace.card_info import CardInfo, card_info, sanitize_description
 
 _CARD_DB, _ = load_cards(locale="deDE")
 

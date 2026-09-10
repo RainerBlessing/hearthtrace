@@ -1,5 +1,5 @@
-from hs_tracker.deck_state import remaining_deck
-from hs_tracker.parser import ParsedGame
+from hearthtrace.deck_state import remaining_deck
+from hearthtrace.parser import ParsedGame
 
 
 def test_remaining_deck_removes_drawn_cards() -> None:

@@ -1,4 +1,4 @@
-"""Load the application config from `~/.config/hs-tracker/config.toml`."""
+"""Load the application config from `~/.config/hearthtrace/config.toml`."""
 
 import tomllib
 from dataclasses import dataclass

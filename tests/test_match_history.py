@@ -2,15 +2,15 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from hs_tracker.markdown_export import export_match_summary
-from hs_tracker.match_history import (
+from hearthtrace.markdown_export import export_match_summary
+from hearthtrace.match_history import (
     MatchHistoryEntry,
     _display_class,
     format_history_row,
     load_match_history,
     record_replay_source,
 )
-from hs_tracker.parser import (
+from hearthtrace.parser import (
     BoardState,
     HandState,
     LifeState,

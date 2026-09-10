@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hs_tracker.log_reader import find_latest_power_log
+from hearthtrace.log_reader import find_latest_power_log
 
 
 def test_find_latest_power_log_picks_newest_folder(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 """Compute which cards remain unseen in the friendly player's deck."""
 
-from hs_tracker.parser import ParsedGame
+from hearthtrace.parser import ParsedGame
 
 
 def remaining_deck(game: ParsedGame) -> list[str]:

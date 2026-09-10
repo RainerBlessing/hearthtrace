@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from hs_tracker.config import ConfigError, load_config
+from hearthtrace.config import ConfigError, load_config
 
 
 def test_load_config_reads_valid_toml(tmp_path: Path) -> None:

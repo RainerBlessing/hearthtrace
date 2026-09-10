@@ -11,19 +11,19 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, GObject, Gtk  # noqa: E402
 from hearthstone.cardxml import load as load_cards  # noqa: E402
 
-from hs_tracker.card_info import CardInfo, card_info  # noqa: E402
-from hs_tracker.config import Config  # noqa: E402
-from hs_tracker.deck_state import remaining_deck  # noqa: E402
-from hs_tracker.log_reader import find_latest_power_log  # noqa: E402
-from hs_tracker.log_setup import check_log_setup, disable_log_size_limit  # noqa: E402
-from hs_tracker.markdown_export import export_match_summary  # noqa: E402
-from hs_tracker.match_history import (  # noqa: E402
+from hearthtrace.card_info import CardInfo, card_info  # noqa: E402
+from hearthtrace.config import Config  # noqa: E402
+from hearthtrace.deck_state import remaining_deck  # noqa: E402
+from hearthtrace.log_reader import find_latest_power_log  # noqa: E402
+from hearthtrace.log_setup import check_log_setup, disable_log_size_limit  # noqa: E402
+from hearthtrace.markdown_export import export_match_summary  # noqa: E402
+from hearthtrace.match_history import (  # noqa: E402
     MatchHistoryEntry,
     format_history_row,
     load_match_history,
     record_replay_source,
 )
-from hs_tracker.parser import (  # noqa: E402
+from hearthtrace.parser import (  # noqa: E402
     HandCard,
     MinionState,
     NoGameFoundError,
@@ -49,7 +49,7 @@ _FINISHED_RESULTS = {"WON", "LOST", "TIED", "CONCEDED"}
 # rather than reading `$XDG_STATE_HOME`, matching `app.py`'s equally
 # hardcoded `CONFIG_PATH` -- no other part of this project reads XDG env
 # vars, so doing it only here would be inconsistent for no real benefit.
-_STATE_DIR = Path.home() / ".local" / "state" / "hs-tracker"
+_STATE_DIR = Path.home() / ".local" / "state" / "hearthtrace"
 
 # The three Replay stages, in viewing order. Kept as separate, ordered
 # stages (not e.g. a bool) specifically so "Start" never shows this turn's
@@ -130,14 +130,14 @@ def _card_tooltip_markup(info: CardInfo) -> str:
 
 class TrackerWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application, config: Config) -> None:
-        super().__init__(application=app, title="HS Tracker")
+        super().__init__(application=app, title="HearthTrace")
         self.set_default_size(320, 480)
         # Deviation from the plan: the plan's sketch called a non-existent
         # `set_widget_name` (AttributeError against the installed GTK4
         # bindings). `Gtk.Widget.set_name` is the real API for a stable CSS
         # node name; the actual Wayland/Hyprland window class comes from
         # the application id passed to `Adw.Application` in app.py.
-        self.set_name("hs-tracker")
+        self.set_name("hearthtrace")
         _install_replay_css()
 
         self._config = config
@@ -387,7 +387,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         try:
             entries = load_match_history(self._config.export_dir, state_dir=_STATE_DIR)
         except Exception as exc:  # noqa: BLE001 - must never break the toggle
-            print(f"hs-tracker: error while loading match history: {exc}", file=sys.stderr)
+            print(f"hearthtrace: error while loading match history: {exc}", file=sys.stderr)
             self._history_list.append(Gtk.Label(label="Fehler beim Laden des Verlaufs", xalign=0))
             return
         if not entries:
@@ -864,7 +864,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         try:
             return self._poll_once()
         except Exception as exc:  # noqa: BLE001 - must never kill the poll loop
-            print(f"hs-tracker: error while polling log: {exc}", file=sys.stderr)
+            print(f"hearthtrace: error while polling log: {exc}", file=sys.stderr)
             self._status_label.set_label("Fehler beim Lesen des Logs — siehe Terminal")
             return True  # keep polling so a transient condition can recover
 
@@ -966,7 +966,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         try:
             record_replay_source(_STATE_DIR, export_path, log_path, game.game_index)
         except OSError as exc:
-            print(f"hs-tracker: could not record replay source: {exc}", file=sys.stderr)
+            print(f"hearthtrace: could not record replay source: {exc}", file=sys.stderr)
         # Marker saved to disk *before* the in-memory key is updated: if
         # `_save_last_exported_key` itself throws (e.g. the state dir just
         # became unwritable), the in-memory key must stay unset too, or a

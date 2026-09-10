@@ -1,10 +1,10 @@
-# HS Tracker
+# HearthTrace
 
 A native Linux Hearthstone tracker focused on replay analysis and learning
 from your games.
 
 Most Hearthstone deck trackers exist to answer "what's left in my deck?"
-while you're playing. HS Tracker cares about a different, slower question:
+while you're playing. HearthTrace cares about a different, slower question:
 after the match is over, what actually happened, turn by turn, and why did
 it go the way it did? It reconstructs every turn from your `Power.log` --
 board state, mana, hand, attack readiness, generated cards -- into a
@@ -61,7 +61,7 @@ Arena/Battlegrounds/Tavern Brawl). The app's own UI text is German.
   the rest of whatever match was in progress).
 - A Python environment with the project's dependencies installed:
   ```bash
-  cd hs-tracker
+  cd hearthtrace
   python -m venv .venv
   .venv/bin/pip install -e ".[dev]"
   ```
@@ -69,7 +69,7 @@ Arena/Battlegrounds/Tavern Brawl). The app's own UI text is German.
 ## Configuration
 
 On first launch, the tracker writes a template to
-`~/.config/hs-tracker/config.toml` and exits with a note to fill it in:
+`~/.config/hearthtrace/config.toml` and exits with a note to fill it in:
 
 ```toml
 logs_dir = "/path/to/your/Logs/folder"
@@ -83,16 +83,16 @@ export_dir = "~/HearthstoneAnalysis"
 ## Usage
 
 1. **Start Hearthstone** as usual (e.g. via Lutris).
-2. **Start HS Tracker** -- either directly:
+2. **Start HearthTrace** -- either directly:
    ```bash
-   cd hs-tracker
-   .venv/bin/python -m hs_tracker.app
+   cd hearthtrace
+   .venv/bin/python -m hearthtrace.app
    ```
    or install it as a desktop entry so it shows up in your app launcher
-   (edit the `Exec=` path in `hs-tracker.desktop` to your own install
+   (edit the `Exec=` path in `hearthtrace.desktop` to your own install
    path first):
    ```bash
-   cp hs-tracker.desktop ~/.local/share/applications/
+   cp hearthtrace.desktop ~/.local/share/applications/
    ```
    The order (Hearthstone first or the tracker first) doesn't matter --
    the tracker polls the log folder and picks up the current session
@@ -113,7 +113,7 @@ reads live from the log -- exporting after the fact from an old
 ## Development
 
 ```bash
-.venv/bin/pytest --cov=src/hs_tracker --cov-report=term-missing
+.venv/bin/pytest --cov=src/hearthtrace --cov-report=term-missing
 .venv/bin/ruff check src tests
 .venv/bin/mypy src
 .venv/bin/radon cc src -a -nb

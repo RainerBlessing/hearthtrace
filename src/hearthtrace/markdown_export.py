@@ -6,8 +6,8 @@ from typing import Any
 
 from hearthstone.cardxml import load as load_cards
 
-from hs_tracker import deck_state
-from hs_tracker.parser import HandState, MinionState, ParsedGame, Turn, TurnSnapshot, WeaponState
+from hearthtrace import deck_state
+from hearthtrace.parser import HandState, MinionState, ParsedGame, Turn, TurnSnapshot, WeaponState
 
 # Public: also used by match_history.py to label a past match's result
 # consistently with how it reads in the export itself.

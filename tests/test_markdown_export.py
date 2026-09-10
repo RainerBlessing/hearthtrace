@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from hs_tracker.markdown_export import export_match_summary, render_match_summary
-from hs_tracker.parser import (
+from hearthtrace.markdown_export import export_match_summary, render_match_summary
+from hearthtrace.parser import (
     Action,
     BoardState,
     HandCard,

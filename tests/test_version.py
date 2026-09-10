@@ -1,4 +1,4 @@
-from hs_tracker import __version__
+from hearthtrace import __version__
 
 
 def test_version_is_defined():

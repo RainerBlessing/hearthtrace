@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hs_tracker.markdown_export import RESULT_LABELS
+from hearthtrace.markdown_export import RESULT_LABELS
 
 _FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_(\w+)\.md$")
 _CLASS_LINE_RE = re.compile(r"\*\*Eigene Klasse:\*\* (\w+) \| \*\*Gegner-Klasse:\*\* (\w+)")

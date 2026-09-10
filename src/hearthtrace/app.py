@@ -8,30 +8,30 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw  # noqa: E402
 
-from hs_tracker.config import ConfigError, load_config  # noqa: E402
-from hs_tracker.ui import TrackerWindow  # noqa: E402
+from hearthtrace.config import ConfigError, load_config  # noqa: E402
+from hearthtrace.ui import TrackerWindow  # noqa: E402
 
-CONFIG_PATH = Path.home() / ".config" / "hs-tracker" / "config.toml"
+CONFIG_PATH = Path.home() / ".config" / "hearthtrace" / "config.toml"
 
 
 def _show_config_error_dialog(app: Adw.Application, message: str) -> None:
     """Show a minimal, dismissible dialog reporting a config error.
 
-    Needed because a user launching via `hs-tracker.desktop` has no
+    Needed because a user launching via `hearthtrace.desktop` has no
     attached terminal, so the `print(e)` alone (kept for anyone running
     from a terminal) would otherwise be invisible -- the app would just
     quit silently. A bare `Adw.AlertDialog` can't be presented without a
     parent widget, so a tiny throwaway window is created to host it; both
     are closed and the app quit once the user dismisses the dialog.
     """
-    host = Adw.ApplicationWindow(application=app, title="HS Tracker")
+    host = Adw.ApplicationWindow(application=app, title="HearthTrace")
     host.set_default_size(1, 1)
     host.present()
 
     dialog = Adw.AlertDialog(
         heading="Konfigurationsfehler",
         body=f"Konfiguration fehlt/unvollständig: {message}. "
-        "Bitte ~/.config/hs-tracker/config.toml bearbeiten.",
+        "Bitte ~/.config/hearthtrace/config.toml bearbeiten.",
     )
     dialog.add_response("ok", "OK")
     dialog.set_default_response("ok")
@@ -41,7 +41,7 @@ def _show_config_error_dialog(app: Adw.Application, message: str) -> None:
 
 
 def main() -> int:
-    app = Adw.Application(application_id="dev.rainer.hs-tracker")
+    app = Adw.Application(application_id="dev.rainer.hearthtrace")
 
     def on_activate(app: Adw.Application) -> None:
         try:

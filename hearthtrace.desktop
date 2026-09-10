@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=HearthTrace
+Comment=Nativer Hearthstone Deck Tracker
+Exec=/path/to/hearthtrace/.venv/bin/python -m hearthtrace.app
+StartupWMClass=dev.rainer.hearthtrace
+Categories=Game;Utility;

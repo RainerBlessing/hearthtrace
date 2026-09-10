@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hs_tracker.log_setup import (
+from hearthtrace.log_setup import (
     LogSetupCheck,
     _upsert_ini_value,
     check_log_setup,

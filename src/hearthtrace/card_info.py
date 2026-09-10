@@ -13,7 +13,7 @@ from typing import Any
 
 from hearthstone.enums import CardType, Rarity
 
-from hs_tracker.parser import KEYWORD_LABELS
+from hearthtrace.parser import KEYWORD_LABELS
 
 _TYPE_LABELS: dict[CardType, str] = {
     CardType.MINION: "Diener",

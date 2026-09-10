@@ -7,7 +7,7 @@ from hearthstone.entities import Card, Game, Player
 from hearthstone.enums import CardType, ChoiceType, GameTag, Zone
 from hslog import packets as hslog_packets
 
-from hs_tracker.parser import (
+from hearthtrace.parser import (
     Action,
     BoardState,
     HandState,
