@@ -90,6 +90,15 @@ EXTRA_TURN_FIXTURE = Path(__file__).parent / "fixtures" / "extra_turn_match.powe
 TRANSFORM_SUMMONING_SICKNESS_FIXTURE = (
     Path(__file__).parent / "fixtures" / "transform_summoning_sickness_match.power.log"
 )
+# A real match where Al'Akir, Lord of Storms (Windfury, 2 attacks/turn)
+# attacks only once on turns 22 and 26, leaving its second attack unused
+# each time. User-reported: a boolean "kann angreifen" that treats "used
+# at least one attack" as "done for the turn" incorrectly hides its still-
+# available second attack -- the exact regression a naive fix for the
+# transform bug above would introduce.
+WINDFURY_ATTACKS_REMAINING_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "windfury_attacks_remaining_match.power.log"
+)
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -543,7 +552,7 @@ def test_minion_keywords_matches_the_reported_regression_scenario() -> None:
     readiness = _AttackReadiness(
         turn_number=5,
         entered_play_turn={1: 4, 2: 5, 3: 5, 4: 5},
-        attacked_this_turn={},
+        attacks_used_this_turn={},
     )
     entities = []
     for entity_id in (1, 2, 3, 4):
@@ -568,7 +577,9 @@ def test_minion_keywords_matches_the_reported_regression_scenario() -> None:
 
 def test_minion_keywords_allows_a_same_turn_transform_with_charge_or_rush() -> None:
     game, friendly, _opponent = _make_game_with_players()
-    readiness = _AttackReadiness(turn_number=5, entered_play_turn={1: 5}, attacked_this_turn={})
+    readiness = _AttackReadiness(
+        turn_number=5, entered_play_turn={1: 5}, attacks_used_this_turn={}
+    )
     entity = _register_card(
         game, entity_id=1, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
     )
@@ -586,11 +597,11 @@ def test_minion_keywords_does_not_let_a_transform_restore_a_consumed_attack() ->
     # entered play in an *earlier* turn (so entered_play_turn doesn't
     # apply) attacks once this turn, then gets transformed. The
     # transform's bogus EXHAUSTED=0 reset must not make it attack-ready
-    # again -- attacked_this_turn (recorded independently, from the
+    # again -- attacks_used_this_turn (recorded independently, from the
     # ATTACK block itself, not the live tag) must still block it.
     game, friendly, _opponent = _make_game_with_players()
     readiness = _AttackReadiness(
-        turn_number=5, entered_play_turn={1: 3}, attacked_this_turn={1: 5}
+        turn_number=5, entered_play_turn={1: 3}, attacks_used_this_turn={1: 1}
     )
     entity = _register_card(
         game, entity_id=1, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
@@ -602,6 +613,54 @@ def test_minion_keywords_does_not_let_a_transform_restore_a_consumed_attack() ->
     entity.tag_change(GameTag.EXHAUSTED, 0)
 
     assert "kann angreifen" not in _minion_keywords(entity, readiness)
+
+
+def test_minion_keywords_treats_a_windfury_minions_first_attack_as_still_ready() -> None:
+    # Code-review-caught regression from the fix above: attacks_used_this_
+    # turn is a count, not a flag, specifically so a Windfury minion's
+    # first attack (1 of its 2 allowed) doesn't get treated the same as an
+    # ordinary minion's only attack.
+    game, friendly, _opponent = _make_game_with_players()
+    readiness = _AttackReadiness(
+        turn_number=5, entered_play_turn={1: 3}, attacks_used_this_turn={1: 1}
+    )
+    entity = _register_card(
+        game, entity_id=1, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
+    )
+    entity.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    entity.tag_change(GameTag.ATK, 3)
+    entity.tag_change(GameTag.HEALTH, 3)
+    entity.tag_change(GameTag.WINDFURY, 1)
+
+    assert "kann angreifen" in _minion_keywords(entity, readiness)
+
+    # A second attack (2 of 2) correctly exhausts it.
+    readiness_after_second = _AttackReadiness(
+        turn_number=5, entered_play_turn={1: 3}, attacks_used_this_turn={1: 2}
+    )
+    assert "kann angreifen" not in _minion_keywords(entity, readiness_after_second)
+
+
+def test_parse_log_leaves_a_windfury_minions_unused_second_attack_ready() -> None:
+    # Real-match ground truth (user-reported): on turn 22, Al'Akir, Lord of
+    # Storms attacks once and leaves a second Windfury attack unused -- the
+    # closing board snapshot must still show it as attack-ready.
+    game = parse_log(WINDFURY_ATTACKS_REMAINING_FIXTURE)
+    turn = next(t for t in game.turns if t.number == 22)
+    al_akir = next(m for m in turn.end.board.own if "Herr der Stürme" in m.name)
+    assert "kann angreifen" in al_akir.keywords
+
+
+def test_parse_log_does_not_grant_a_phantom_attack_after_windfury_is_silenced() -> None:
+    # Same match, turn 26: the opponent silenced Al'Akir earlier (Naarusplitter),
+    # so it no longer has Windfury and only one attack per turn. It uses that
+    # single attack, so the closing snapshot must show no attack remaining --
+    # the fix must not keep granting a second attack once Windfury is gone.
+    game = parse_log(WINDFURY_ATTACKS_REMAINING_FIXTURE)
+    turn = next(t for t in game.turns if t.number == 26)
+    al_akir = next(m for m in turn.end.board.own if "Herr der Stürme" in m.name)
+    assert "kann angreifen" not in al_akir.keywords
+    assert "Windfury" not in al_akir.keywords
 
 
 def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:

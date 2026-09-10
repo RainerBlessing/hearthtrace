@@ -405,33 +405,37 @@ class _AttackReadiness:
     exhausted=1 (summoning sickness, or an already-used attack) the
     instant before, and nothing ever corrects either tag back for the
     rest of that turn. Neither live tag is trustworthy right after a
-    transform; both facts below are about the *entity id*, which a
-    transform (same id, only the card changes) must not reset, and are
-    recorded independently of the live tags for exactly that reason.
+    transform, so attack readiness is computed entirely from the two
+    facts below instead -- both about the *entity id*, which a transform
+    (same id, only the card changes) must not reset, and both recorded
+    independently of the live tags for exactly that reason.
     """
 
     turn_number: int
-    # entity_id -> the turn it first reached Zone.PLAY. First-write-wins.
+    # entity_id -> the turn it first reached Zone.PLAY. First-write-wins,
+    # kept for the whole match (an entity only ever enters play once).
     entered_play_turn: dict[int, int]
-    # entity_id -> the turn it last attacked on. Overwritten on each
-    # attack (a Windfury minion can attack more than once a turn) -- only
-    # ever compared for equality with the *current* turn, so the exact
-    # count doesn't matter, only "at least once this turn".
-    attacked_this_turn: dict[int, int]
+    # entity_id -> how many attacks it has made *this* turn. A plain
+    # count, not a boolean: a Windfury minion gets two attacks a turn, and
+    # a first attack must not be mistaken for "done for the turn" --
+    # verified against a real match (Al'Akir, Lord of Storms attacking
+    # only once on a turn, its second Windfury attack left unused). Reset
+    # to empty at the start of every turn (see `_TurnBuilder.on_turn_ready`).
+    attacks_used_this_turn: dict[int, int]
 
 
 def _minion_keywords(entity: Entity, readiness: _AttackReadiness) -> list[str]:
     keywords = [label for tag, label in _KEYWORD_TAGS if entity.tags.get(tag, 0)]
     attack = entity.tags.get(GameTag.ATK, 0)
-    exhausted = entity.tags.get(GameTag.EXHAUSTED, 0)
     frozen = entity.tags.get(GameTag.FROZEN, 0)
     has_charge_or_rush = entity.tags.get(GameTag.CHARGE, 0) or entity.tags.get(GameTag.RUSH, 0)
     summoning_sick = (
         readiness.entered_play_turn.get(entity.id) == readiness.turn_number
         and not has_charge_or_rush
     )
-    already_attacked = readiness.attacked_this_turn.get(entity.id) == readiness.turn_number
-    if attack > 0 and not exhausted and not frozen and not summoning_sick and not already_attacked:
+    allowed_attacks = 2 if entity.tags.get(GameTag.WINDFURY, 0) else 1
+    attacks_remaining = allowed_attacks - readiness.attacks_used_this_turn.get(entity.id, 0)
+    if attack > 0 and not frozen and not summoning_sick and attacks_remaining > 0:
         keywords.append("kann angreifen")
     return keywords
 
@@ -1059,10 +1063,11 @@ class _TurnBuilder:
         # write-wins, so a later transform (same entity id, new card via
         # CHANGE_ENTITY) never overwrites it. See `_AttackReadiness`.
         self._entered_play_turn: dict[int, int] = {}
-        # The turn number an entity id last attacked on -- overwritten on
-        # each attack (Windfury), only ever compared for "== this turn".
-        # See `_AttackReadiness`.
-        self._attacked_this_turn: dict[int, int] = {}
+        # entity_id -> how many attacks it has made this turn. Reset to
+        # empty at the start of every turn (`on_turn_ready`) -- unlike
+        # `_entered_play_turn`, this must NOT persist across turns. See
+        # `_AttackReadiness`.
+        self._attacks_used_this_turn: dict[int, int] = {}
         self.turns: list[Turn] = []
 
     def on_entity_entered_play(self, entity_id: int) -> None:
@@ -1071,7 +1076,9 @@ class _TurnBuilder:
         self._entered_play_turn[entity_id] = self._current.number
 
     def _readiness(self, turn_number: int) -> _AttackReadiness:
-        return _AttackReadiness(turn_number, self._entered_play_turn, self._attacked_this_turn)
+        return _AttackReadiness(
+            turn_number, self._entered_play_turn, self._attacks_used_this_turn
+        )
 
     def _players(self, game: Game) -> tuple[Player, Player]:
         if self._me is None:
@@ -1112,6 +1119,10 @@ class _TurnBuilder:
         active = _active_player(game, turn_number)
         assert active is not None
         self._active = active
+        # Hearthstone itself resets every entity's attack count at the
+        # start of each new turn -- mirrored here since this dict is the
+        # authoritative source for `_minion_keywords`, not the live tag.
+        self._attacks_used_this_turn = {}
         self._current = Turn(
             number=turn_number,
             player_name=_player_label(active, me),
@@ -1194,9 +1205,12 @@ class _TurnBuilder:
             # THIS_TURN tags for the same reason `_entered_play_turn` is:
             # a same-turn transform (CHANGE_ENTITY) resets both of those
             # unconditionally, which would otherwise make an already-
-            # attacked minion look ready to attack again. See
-            # `_AttackReadiness`.
-            self._attacked_this_turn[block.entity] = self._current.number
+            # attacked minion look ready to attack again. Incremented, not
+            # set to a flag -- a Windfury minion's first attack this turn
+            # must not be mistaken for its second. See `_AttackReadiness`.
+            self._attacks_used_this_turn[block.entity] = (
+                self._attacks_used_this_turn.get(block.entity, 0) + 1
+            )
         if _is_merge_only_block(block):
             self._merge_effects_into_last_action(game, me, before_entities, after_entities, order)
             return
