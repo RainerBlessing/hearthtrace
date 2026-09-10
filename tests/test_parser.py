@@ -99,6 +99,18 @@ TRANSFORM_SUMMONING_SICKNESS_FIXTURE = (
 WINDFURY_ATTACKS_REMAINING_FIXTURE = (
     Path(__file__).parent / "fixtures" / "windfury_attacks_remaining_match.power.log"
 )
+# A real match where Al'Akir, Lord of Storms' own "SpawntoHand" sub-spell
+# (SpellPrefabGUID=CATAFX_Al'Akir_SpawntoHand:...) breaks hslog's own
+# SUB_SPELL_START regex -- the apostrophe in the card's name ends up inside
+# the effect id, and hslog hands a `PlayerReference` object as a packet's
+# entity id instead of an int further down the line. hslog's own
+# `handle_full_entity` does `int(entity_id)` and raises `TypeError`,
+# crashing the whole parse. User-reported live: the running app got stuck
+# showing "Fehler beim Lesen des Logs" for the rest of the match once this
+# was hit.
+APOSTROPHE_SUBSPELL_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "apostrophe_subspell_match.power.log"
+)
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -661,6 +673,11 @@ def test_parse_log_does_not_grant_a_phantom_attack_after_windfury_is_silenced() 
     al_akir = next(m for m in turn.end.board.own if "Herr der Stürme" in m.name)
     assert "kann angreifen" not in al_akir.keywords
     assert "Windfury" not in al_akir.keywords
+
+
+def test_parse_log_survives_a_malformed_subspell_packet_from_an_apostrophe_in_a_card_id() -> None:
+    game = parse_log(APOSTROPHE_SUBSPELL_FIXTURE)
+    assert len(game.turns) > 0
 
 
 def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:

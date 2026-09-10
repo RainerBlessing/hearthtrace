@@ -1310,7 +1310,20 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
         self._builder.on_entity_touched(int(coerce_to_entity_id(packet.entity)))
 
     def export_packet(self, packet: Any) -> Any:
-        result = super().export_packet(packet)
+        try:
+            result = super().export_packet(packet)
+        except TypeError:
+            # Verified against a real match: a card whose internal effect id
+            # contains an apostrophe (Al'Akir, Lord of Storms' "SpawntoHand"
+            # sub-spell, SpellPrefabGUID=CATAFX_Al'Akir_SpawntoHand:...)
+            # breaks hslog's own SUB_SPELL_START regex, which then hands a
+            # PlayerReference object as a packet's entity id instead of an
+            # int -- hslog's handle_full_entity does `int(entity_id)` and
+            # raises. This is a malformed *packet* (hslog's own parser lost
+            # its place), not a malformed *line* (already handled leniently
+            # in `parse_log`'s per-line read) -- skip just this one packet
+            # rather than losing the rest of the match.
+            return None
         if isinstance(packet, _TOUCH_ONLY_PACKET_TYPES):
             self._touch(packet)
             # A summoned token is often created directly into Zone.PLAY via
