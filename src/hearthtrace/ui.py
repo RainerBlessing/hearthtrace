@@ -16,7 +16,7 @@ from hearthtrace.config import Config  # noqa: E402
 from hearthtrace.deck_state import remaining_deck  # noqa: E402
 from hearthtrace.log_reader import find_latest_power_log  # noqa: E402
 from hearthtrace.log_setup import check_log_setup, disable_log_size_limit  # noqa: E402
-from hearthtrace.markdown_export import export_match_summary  # noqa: E402
+from hearthtrace.markdown_export import RESULT_LABELS, export_match_summary  # noqa: E402
 from hearthtrace.match_history import (  # noqa: E402
     MatchHistoryEntry,
     format_history_row,
@@ -39,6 +39,29 @@ from hearthtrace.parser import (  # noqa: E402
 # UNKNOWN, INVALID -- means the match is still in progress and must not
 # trigger an export yet.
 _FINISHED_RESULTS = {"WON", "LOST", "TIED", "CONCEDED"}
+
+# UI-only German class-name relabeling for the Live match-status card --
+# `game.own_class`/`opponent_class` are the raw `CardClass` enum name
+# (e.g. "SHAMAN"), used as-is everywhere else in the app (Markdown export
+# included) since that text isn't user-facing prose there. Here it's the
+# most prominent thing on the page, right next to an already-German result
+# label, so leaving it in English would read as an inconsistency the user
+# actually flagged. Same precedent as `_KEYWORD_CHIP_LABELS` below: a
+# presentational-only remap, parser.py's own data is untouched.
+_CLASS_LABELS = {
+    "DEATHKNIGHT": "Todesritter",
+    "DEMONHUNTER": "Dämonenjäger",
+    "DRUID": "Druide",
+    "HUNTER": "Jäger",
+    "MAGE": "Magier",
+    "PALADIN": "Paladin",
+    "PRIEST": "Priester",
+    "ROGUE": "Schurke",
+    "SHAMAN": "Schamane",
+    "WARLOCK": "Hexenmeister",
+    "WARRIOR": "Krieger",
+    "UNKNOWN": "Unbekannt",
+}
 
 # Dedicated app-state location for the export dedup marker (see
 # `_last_export_marker_path`) -- deliberately *not* inside `export_dir`,
@@ -193,17 +216,25 @@ class TrackerWindow(Adw.ApplicationWindow):
             toggle.set_label(label)
             view_group.add(toggle)
         view_group.connect("notify::active-name", self._on_view_toggled)
-        header_bar.pack_end(view_group)
+        # App name at the start, the view switcher as the header's own
+        # (centered) title widget -- the standard GNOME/libadwaita header
+        # hierarchy, instead of the window's own title fighting the
+        # switcher for the header's one centered slot.
+        app_name_label = Gtk.Label(label="HearthTrace")
+        app_name_label.add_css_class("heading")
+        header_bar.pack_start(app_name_label)
+        header_bar.set_title_widget(view_group)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header_bar)
 
-        self._status_label = Gtk.Label(label="Warte auf Hearthstone …")
-        self._deck_list = Gtk.ListBox()
-
-        tracker_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        tracker_box.append(self._status_label)
-        tracker_box.append(self._deck_list)
+        # Rebuilt in place on every poll tick by `_render_tracker_*` below
+        # (same "clear and re-add" convention already used for
+        # `_history_list`/`_deck_list`'s rows), rather than a nested
+        # Gtk.Stack -- the three states share no widgets worth preserving
+        # between them.
+        self._tracker_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self._render_tracker_empty("Warte auf Hearthstone …")
 
         self._history_entries: list[MatchHistoryEntry] = []
         self._history_list = Gtk.ListBox()
@@ -215,7 +246,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         replay_scroller.set_child(self._clamp(self._build_replay_box()))
 
         self._stack = Gtk.Stack()
-        self._stack.add_named(self._clamp(tracker_box), "tracker")
+        self._stack.add_named(self._clamp(self._tracker_box), "tracker")
         self._stack.add_named(history_scroller, "history")
         self._stack.add_named(replay_scroller, "replay")
         toolbar_view.set_content(self._stack)
@@ -865,13 +896,13 @@ class TrackerWindow(Adw.ApplicationWindow):
             return self._poll_once()
         except Exception as exc:  # noqa: BLE001 - must never kill the poll loop
             print(f"hearthtrace: error while polling log: {exc}", file=sys.stderr)
-            self._status_label.set_label("Fehler beim Lesen des Logs — siehe Terminal")
+            self._render_tracker_error("Fehler beim Lesen des Logs — siehe Terminal")
             return True  # keep polling so a transient condition can recover
 
     def _poll_once(self) -> bool:
         log_path = find_latest_power_log(self._config.logs_dir)
         if log_path is None or not log_path.exists():
-            self._status_label.set_label("Warte auf Hearthstone …")
+            self._render_tracker_empty("HearthTrace wartet auf das nächste Hearthstone-Spiel.")
             return True
 
         mtime = log_path.stat().st_mtime
@@ -889,7 +920,7 @@ class TrackerWindow(Adw.ApplicationWindow):
             # would only give the same result again.
             self._last_log_path = log_path
             self._last_log_mtime = mtime
-            self._status_label.set_label("Warte auf Hearthstone …")
+            self._render_tracker_empty("HearthTrace wartet auf das nächste Hearthstone-Spiel.")
             return True
 
         # Only remember this mtime as "handled" once *everything* this tick
@@ -903,28 +934,143 @@ class TrackerWindow(Adw.ApplicationWindow):
         # file changes again -- for an already-finished match sitting in
         # the newest log file, that can mean never, silently dropping the
         # export for good.
-        self._refresh_deck_list(game)
+        self._render_tracker_match(game)
         self._maybe_export(game, log_path)
         self._update_replay_state(game)
         self._last_log_path = log_path
         self._last_log_mtime = mtime
         return True
 
-    def _refresh_deck_list(self, game: ParsedGame) -> None:
-        status = f"{game.own_class} vs. {game.opponent_class} — Ergebnis: {game.result}"
-        if game.log_truncated and game.result not in _FINISHED_RESULTS:
+    def _render_tracker_empty(self, description: str) -> None:
+        self._clear_box(self._tracker_box)
+        status_page = Adw.StatusPage(title="Keine laufende Partie", description=description)
+        status_page.set_vexpand(True)
+        self._tracker_box.append(status_page)
+
+    def _render_tracker_error(self, message: str) -> None:
+        self._clear_box(self._tracker_box)
+        status_page = Adw.StatusPage(title="Fehler", description=message)
+        status_page.set_vexpand(True)
+        self._tracker_box.append(status_page)
+
+    def _render_tracker_match(self, game: ParsedGame) -> None:
+        """Render the Live page's one "Aktuelle Partie" status card, plus
+        state-specific content below it: an in-progress match shows live
+        health/deck state, a finished one shows the result and a way into
+        Replay -- an empty box (the old behaviour) never explained *why*
+        nothing else was shown, which read as unfinished rather than
+        intentionally minimal.
+        """
+        self._clear_box(self._tracker_box)
+        finished = game.result in _FINISHED_RESULTS
+        own_class = _CLASS_LABELS.get(game.own_class, game.own_class)
+        opponent_class = _CLASS_LABELS.get(game.opponent_class, game.opponent_class)
+        turn_number = game.turns[-1].number if game.turns else 0
+
+        if finished:
+            detail_text = f"{RESULT_LABELS.get(game.result, game.result)} · {turn_number} Züge"
+        else:
+            detail_text = f"Zug {turn_number}"
+        if game.log_truncated and not finished:
             # Hearthstone itself stopped writing to Power.log once it hit
             # its 10MB size limit -- `game.result` is whatever it last was
             # before that, not the match's true (possibly already decided)
             # current state. Showing it bare would be actively misleading.
-            status += " (Hearthstone-Log abgeschnitten — Status evtl. veraltet)"
-        self._status_label.set_label(status)
-        while (row := self._deck_list.get_row_at_index(0)) is not None:
-            self._deck_list.remove(row)
-        for card_id in remaining_deck(game):
+            detail_text += " (Hearthstone-Log abgeschnitten — Status evtl. veraltet)"
+        status_card = self._build_match_status_card(own_class, opponent_class, detail_text)
+        self._tracker_box.append(status_card)
+
+        if finished:
+            self._tracker_box.append(self._build_finished_match_footer())
+        elif game.turns:
+            self._tracker_box.append(self._build_in_progress_match_body(game))
+
+    @staticmethod
+    def _build_match_status_card(own_class: str, opponent_class: str, detail_text: str) -> Gtk.Box:
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.add_css_class("card")
+        card.set_margin_start(4)
+        card.set_margin_end(4)
+
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        inner.set_margin_top(12)
+        inner.set_margin_bottom(12)
+        inner.set_margin_start(12)
+        inner.set_margin_end(12)
+        card.append(inner)
+
+        heading = Gtk.Label(label="Aktuelle Partie", xalign=0)
+        heading.add_css_class("caption")
+        heading.add_css_class("dim-label")
+        inner.append(heading)
+
+        matchup = Gtk.Label(label=f"{own_class} vs. {opponent_class}", xalign=0)
+        matchup.add_css_class("title-4")
+        inner.append(matchup)
+
+        detail = Gtk.Label(label=detail_text, xalign=0)
+        detail.add_css_class("dim-label")
+        inner.append(detail)
+        return card
+
+    def _build_finished_match_footer(self) -> Gtk.Box:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        message = Gtk.Label(label="Die Partie ist beendet.", xalign=0)
+        message.add_css_class("dim-label")
+        box.append(message)
+        replay_button = Gtk.Button(label="Replay ansehen")
+        replay_button.add_css_class("suggested-action")
+        replay_button.set_halign(Gtk.Align.START)
+        replay_button.connect("clicked", self._on_view_finished_replay)
+        box.append(replay_button)
+        return box
+
+    def _on_view_finished_replay(self, _button: Gtk.Button) -> None:
+        # `_update_replay_state` already keeps `_replay_game` following the
+        # live match (unless pinned to a past one from Verlauf, which this
+        # button is never reachable from) -- nothing to set up beyond
+        # switching pages.
+        self._view_group.set_active_name("replay")
+
+    def _build_in_progress_match_body(self, game: ParsedGame) -> Gtk.Box:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        life = game.turns[-1].end.life
+        life_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        life_box.append(self._build_life_row("Du", life.own_health, life.own_armor))
+        life_box.append(self._build_life_row("Gegner", life.opponent_health, life.opponent_armor))
+        box.append(life_box)
+
+        deck = remaining_deck(game)
+        deck_caption = Gtk.Label(label=f"Deck — {len(deck)} Karten verbleibend", xalign=0)
+        deck_caption.add_css_class("caption")
+        deck_caption.add_css_class("dim-label")
+        box.append(deck_caption)
+
+        deck_list = Gtk.ListBox()
+        deck_list.add_css_class("boxed-list")
+        for card_id in deck:
             card = self._card_db.get(card_id)
             card_name = card.name if card else card_id
-            self._deck_list.append(Gtk.Label(label=card_name, xalign=0))
+            deck_list.append(Gtk.Label(label=card_name, xalign=0, margin_top=4, margin_bottom=4))
+        box.append(deck_list)
+        return box
+
+    @staticmethod
+    def _build_life_row(name: str, health: int, armor: int) -> Gtk.Box:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        name_label = Gtk.Label(label=name, xalign=0)
+        name_label.set_hexpand(True)
+        row.append(name_label)
+        text = f"{health} Leben"
+        if armor:
+            text += f" (+{armor} Rüstung)"
+        row.append(Gtk.Label(label=text, xalign=1))
+        return row
 
     def _maybe_export(self, game: ParsedGame, log_path: Path) -> None:
         """Export a Markdown summary once per finished match.
