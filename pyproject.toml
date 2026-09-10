@@ -38,9 +38,9 @@ dev = [
 hearthtrace = "hearthtrace.app:main"
 
 [project.urls]
-Homepage = "https://github.com/rainerblessing/hearthtrace"
-Repository = "https://github.com/rainerblessing/hearthtrace"
-Issues = "https://github.com/rainerblessing/hearthtrace/issues"
+Homepage = "https://github.com/RainerBlessing/hearthtrace"
+Repository = "https://github.com/RainerBlessing/hearthtrace"
+Issues = "https://github.com/RainerBlessing/hearthtrace/issues"
 
 [build-system]
 requires = ["setuptools>=68"]

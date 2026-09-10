@@ -146,7 +146,7 @@ Small, concrete next steps:
 ## Installation
 
 ```bash
-git clone https://github.com/rainerblessing/hearthtrace.git
+git clone https://github.com/RainerBlessing/hearthtrace.git
 cd hearthtrace
 python -m venv .venv
 .venv/bin/pip install -e .
