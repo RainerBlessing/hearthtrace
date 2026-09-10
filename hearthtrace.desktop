@@ -2,6 +2,7 @@
 Type=Application
 Name=HearthTrace
 Comment=Nativer Hearthstone Deck Tracker
-Exec=/path/to/hearthtrace/.venv/bin/python -m hearthtrace.app
+Exec=/path/to/hearthtrace/.venv/bin/hearthtrace
+Icon=dev.rainer.hearthtrace
 StartupWMClass=dev.rainer.hearthtrace
 Categories=Game;Utility;
