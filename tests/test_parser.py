@@ -16,6 +16,7 @@ from hs_tracker.parser import (
     NoGameFoundError,
     Turn,
     TurnSnapshot,
+    _AttackReadiness,
     _build_attack_action,
     _class_name,
     _deck_status,
@@ -27,6 +28,7 @@ from hs_tracker.parser import (
     _is_merge_only_block,
     _mana_headline_suffix,
     _mana_state,
+    _minion_keywords,
     _snapshot_entities,
     _target_suffix,
     _TurnBuilder,
@@ -79,6 +81,15 @@ END_OF_TURN_TRIGGER_FIXTURE = (
 # alternating, and the global turn counter never re-syncs with it on its
 # own for the rest of the match.
 EXTRA_TURN_FIXTURE = Path(__file__).parent / "fixtures" / "extra_turn_match.power.log"
+# A real match where Colifero the Artist transforms four minions into
+# Alexstrasza on turn 36: one (Zeitadmiral Hakenschwanz) had been on the
+# board since an earlier turn; the other three (Auferstandene Onyxia, and
+# two Onyxia's Wing tokens summoned earlier the *same* turn) were all
+# summoning-sick. User-reported: the export marked all four "kann
+# angreifen" after the transform.
+TRANSFORM_SUMMONING_SICKNESS_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "transform_summoning_sickness_match.power.log"
+)
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -494,6 +505,103 @@ def test_parse_log_attributes_turns_correctly_across_an_extra_turn_card() -> Non
     # mislabeled turns' actions were never wrong, only the header was.
     assert all(a.headline.startswith("Gegner:") for a in by_number[21].actions)
     assert all(a.headline.startswith("Du:") for a in by_number[22].actions)
+
+
+def test_parse_log_preserves_summoning_sickness_across_a_transform() -> None:
+    # Real-match ground truth (user-reported): Colifero the Artist
+    # transforms four minions into Alexstrasza on turn 36. Verified
+    # against the raw log: Hearthstone's own CHANGE_ENTITY packet resets
+    # EXHAUSTED=0 for every one of the four unconditionally, including the
+    # three that were genuinely still summoning-sick a moment before --
+    # only the one that had been on the board since an earlier turn
+    # (Zeitadmiral Hakenschwanz) should actually show "kann angreifen".
+    game = parse_log(TRANSFORM_SUMMONING_SICKNESS_FIXTURE)
+    turn36 = next(t for t in game.turns if t.number == 36)
+    by_name = {m.name: m for m in turn36.end.board.own}
+
+    assert "kann angreifen" in by_name["Alexstrasza #2"].keywords  # was on board since before
+    assert "kann angreifen" not in by_name["Alexstrasza #3"].keywords  # played this turn
+    assert "kann angreifen" not in by_name["Alexstrasza #4"].keywords  # summoned this turn
+    assert "kann angreifen" not in by_name["Alexstrasza #5"].keywords  # summoned this turn
+    # The action trail's own transform line must agree with the board.
+    play_action = next(
+        a for a in turn36.actions if "Colifero der Künstler #1 gespielt" in a.headline
+    )
+    assert "Zeitadmiral Hakenschwanz #1 transformiert zu Alexstrasza #2 (8/8, kann angreifen)" in (
+        play_action.effects
+    )
+    assert "Auferstandene Onyxia #1 transformiert zu Alexstrasza #3 (8/8)" in play_action.effects
+
+
+def test_minion_keywords_matches_the_reported_regression_scenario() -> None:
+    # Direct unit-level version of the scenario above, per the shape the
+    # user's own report suggested: entity A entered play last turn (turn
+    # 4), B/C/D all entered play *this* turn (turn 5, one played from
+    # hand, two summoned) -- transforming all four into an identical
+    # minion without Charge/Rush must only leave A attack-ready.
+    game, friendly, _opponent = _make_game_with_players()
+    readiness = _AttackReadiness(
+        turn_number=5,
+        entered_play_turn={1: 4, 2: 5, 3: 5, 4: 5},
+        attacked_this_turn={},
+    )
+    entities = []
+    for entity_id in (1, 2, 3, 4):
+        entity = _register_card(
+            game, entity_id=entity_id, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
+        )
+        entity.tag_change(GameTag.CARDTYPE, CardType.MINION)
+        entity.tag_change(GameTag.ATK, 3)
+        entity.tag_change(GameTag.HEALTH, 3)
+        # The bug being regression-tested: a transform's CHANGE_ENTITY
+        # resets EXHAUSTED=0 for *every* target, including the still
+        # summoning-sick ones -- entered_play_turn must override this.
+        entity.tag_change(GameTag.EXHAUSTED, 0)
+        entities.append(entity)
+    a, b, c, d = entities
+
+    assert "kann angreifen" in _minion_keywords(a, readiness)
+    assert "kann angreifen" not in _minion_keywords(b, readiness)
+    assert "kann angreifen" not in _minion_keywords(c, readiness)
+    assert "kann angreifen" not in _minion_keywords(d, readiness)
+
+
+def test_minion_keywords_allows_a_same_turn_transform_with_charge_or_rush() -> None:
+    game, friendly, _opponent = _make_game_with_players()
+    readiness = _AttackReadiness(turn_number=5, entered_play_turn={1: 5}, attacked_this_turn={})
+    entity = _register_card(
+        game, entity_id=1, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
+    )
+    entity.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    entity.tag_change(GameTag.ATK, 3)
+    entity.tag_change(GameTag.HEALTH, 3)
+    entity.tag_change(GameTag.EXHAUSTED, 0)
+    entity.tag_change(GameTag.CHARGE, 1)
+
+    assert "kann angreifen" in _minion_keywords(entity, readiness)
+
+
+def test_minion_keywords_does_not_let_a_transform_restore_a_consumed_attack() -> None:
+    # Second regression case from the user's own report: an entity that
+    # entered play in an *earlier* turn (so entered_play_turn doesn't
+    # apply) attacks once this turn, then gets transformed. The
+    # transform's bogus EXHAUSTED=0 reset must not make it attack-ready
+    # again -- attacked_this_turn (recorded independently, from the
+    # ATTACK block itself, not the live tag) must still block it.
+    game, friendly, _opponent = _make_game_with_players()
+    readiness = _AttackReadiness(
+        turn_number=5, entered_play_turn={1: 3}, attacked_this_turn={1: 5}
+    )
+    entity = _register_card(
+        game, entity_id=1, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
+    )
+    entity.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    entity.tag_change(GameTag.ATK, 3)
+    entity.tag_change(GameTag.HEALTH, 3)
+    # The transform's bogus reset, exactly as observed in the real log.
+    entity.tag_change(GameTag.EXHAUSTED, 0)
+
+    assert "kann angreifen" not in _minion_keywords(entity, readiness)
 
 
 def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:

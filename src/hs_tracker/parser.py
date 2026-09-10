@@ -393,35 +393,77 @@ def _hand_state(me: Player, opponent: Player, card_db: Any) -> HandState:
     )
 
 
-def _minion_keywords(entity: Entity) -> list[str]:
+@dataclass
+class _AttackReadiness:
+    """Per-match, per-entity id tracking needed to correctly compute "kann
+    angreifen" across a same-turn transform (Polymorph/Hex-style effects,
+    or a multi-minion combo like Colifero the Artist turning several
+    minions into Alexstrasza): verified against a real match's raw log,
+    Hearthstone's own CHANGE_ENTITY packet resets *both* EXHAUSTED and
+    NUM_ATTACKS_THIS_TURN to a fresh baseline for the transform's result,
+    unconditionally -- even for an entity that had correctly been
+    exhausted=1 (summoning sickness, or an already-used attack) the
+    instant before, and nothing ever corrects either tag back for the
+    rest of that turn. Neither live tag is trustworthy right after a
+    transform; both facts below are about the *entity id*, which a
+    transform (same id, only the card changes) must not reset, and are
+    recorded independently of the live tags for exactly that reason.
+    """
+
+    turn_number: int
+    # entity_id -> the turn it first reached Zone.PLAY. First-write-wins.
+    entered_play_turn: dict[int, int]
+    # entity_id -> the turn it last attacked on. Overwritten on each
+    # attack (a Windfury minion can attack more than once a turn) -- only
+    # ever compared for equality with the *current* turn, so the exact
+    # count doesn't matter, only "at least once this turn".
+    attacked_this_turn: dict[int, int]
+
+
+def _minion_keywords(entity: Entity, readiness: _AttackReadiness) -> list[str]:
     keywords = [label for tag, label in _KEYWORD_TAGS if entity.tags.get(tag, 0)]
     attack = entity.tags.get(GameTag.ATK, 0)
     exhausted = entity.tags.get(GameTag.EXHAUSTED, 0)
     frozen = entity.tags.get(GameTag.FROZEN, 0)
-    if attack > 0 and not exhausted and not frozen:
+    has_charge_or_rush = entity.tags.get(GameTag.CHARGE, 0) or entity.tags.get(GameTag.RUSH, 0)
+    summoning_sick = (
+        readiness.entered_play_turn.get(entity.id) == readiness.turn_number
+        and not has_charge_or_rush
+    )
+    already_attacked = readiness.attacked_this_turn.get(entity.id) == readiness.turn_number
+    if attack > 0 and not exhausted and not frozen and not summoning_sick and not already_attacked:
         keywords.append("kann angreifen")
     return keywords
 
 
-def _minion_state(entity: Entity, namer: "_InstanceNamer") -> MinionState:
+def _minion_state(
+    entity: Entity, namer: "_InstanceNamer", readiness: _AttackReadiness
+) -> MinionState:
     health = entity.tags.get(GameTag.HEALTH, 0) - entity.tags.get(GameTag.DAMAGE, 0)
     return MinionState(
         name=namer.minion_name(entity),
         attack=entity.tags.get(GameTag.ATK, 0),
         health=health,
-        keywords=_minion_keywords(entity),
+        keywords=_minion_keywords(entity, readiness),
         card_id=entity.card_id or "",
     )
 
 
-def _board_of(player: Player, namer: "_InstanceNamer") -> list[MinionState]:
+def _board_of(
+    player: Player, namer: "_InstanceNamer", readiness: _AttackReadiness
+) -> list[MinionState]:
     minions = [e for e in player.in_zone(Zone.PLAY) if e.type == CardType.MINION]
     minions.sort(key=lambda e: e.tags.get(GameTag.ZONE_POSITION, 0))
-    return [_minion_state(entity, namer) for entity in minions]
+    return [_minion_state(entity, namer, readiness) for entity in minions]
 
 
-def _board_state(me: Player, opponent: Player, namer: "_InstanceNamer") -> BoardState:
-    return BoardState(own=_board_of(me, namer), opponent=_board_of(opponent, namer))
+def _board_state(
+    me: Player, opponent: Player, namer: "_InstanceNamer", readiness: _AttackReadiness
+) -> BoardState:
+    return BoardState(
+        own=_board_of(me, namer, readiness),
+        opponent=_board_of(opponent, namer, readiness),
+    )
 
 
 def _weapon_of(player: Player, card_db: Any) -> WeaponState | None:
@@ -447,6 +489,7 @@ def _turn_snapshot(
     active: Player,
     card_db: Any,
     namer: "_InstanceNamer",
+    readiness: _AttackReadiness,
     frozen: dict[int, int] | None = None,
 ) -> TurnSnapshot:
     # Life/hand/board are always shown from the friendly player's own point
@@ -456,7 +499,7 @@ def _turn_snapshot(
         mana=_mana_state(active),
         life=_life_state(me, opponent, frozen),
         hand=_hand_state(me, opponent, card_db),
-        board=_board_state(me, opponent, namer),
+        board=_board_state(me, opponent, namer, readiness),
         own_weapon=_weapon_of(me, card_db),
         opponent_weapon=_weapon_of(opponent, card_db),
     )
@@ -664,12 +707,12 @@ def _entity_diff_lines(
     return _stat_diff_lines(entity_type == CardType.HERO, name, resolved_previous, current)
 
 
-def _format_minion_stats(entity: Entity, zone: Zone) -> str:
+def _format_minion_stats(entity: Entity, zone: Zone, readiness: _AttackReadiness) -> str:
     attack = entity.tags.get(GameTag.ATK, 0)
     health = entity.tags.get(GameTag.HEALTH, 0) - entity.tags.get(GameTag.DAMAGE, 0)
     # Keywords like Taunt or "kann angreifen" are board concepts -- showing
     # them for a card sitting in hand would be misleading.
-    keywords = _minion_keywords(entity) if zone == Zone.PLAY else []
+    keywords = _minion_keywords(entity, readiness) if zone == Zone.PLAY else []
     if keywords:
         return f"{attack}/{health}, {', '.join(keywords)}"
     return f"{attack}/{health}"
@@ -681,6 +724,7 @@ def _transform_line(
     friendly_player: Player,
     previous: tuple[Zone, int, int, int, str] | None,
     current: tuple[Zone, int, int, int, str],
+    readiness: _AttackReadiness,
 ) -> str | None:
     """A minion that changes card id while staying in the same visible
     zone (Hex/Polymorph on the board, or a hand card whose generated
@@ -699,7 +743,8 @@ def _transform_line(
         return None
     old_name = namer.minion_name_for_card_id(entity.id, card_id_before) + _zone_label(zone_before)
     new_name = namer.display_name(entity, friendly_player)
-    return f"{old_name} transformiert zu {new_name} ({_format_minion_stats(entity, zone_after)})"
+    stats = _format_minion_stats(entity, zone_after, readiness)
+    return f"{old_name} transformiert zu {new_name} ({stats})"
 
 
 def _generated_into_hand_line(
@@ -751,7 +796,9 @@ def _diff_effects(
     after: _EntitySnapshot,
     exclude: frozenset[int] = frozenset(),
     order: list[int] | None = None,
+    readiness: _AttackReadiness | None = None,
 ) -> list[str]:
+    readiness = readiness or _AttackReadiness(0, {}, {})
     lines = []
     for entity_id in _ordered_entity_ids(after, order):
         if entity_id in exclude:
@@ -761,7 +808,7 @@ def _diff_effects(
         if entity is None:
             continue
         previous = before.get(entity_id)
-        transform = _transform_line(entity, namer, friendly_player, previous, current)
+        transform = _transform_line(entity, namer, friendly_player, previous, current, readiness)
         if transform is not None:
             lines.append(transform)
             continue
@@ -886,6 +933,7 @@ def _build_attack_action(
     before: _EntitySnapshot,
     after: _EntitySnapshot,
     order: list[int] | None = None,
+    readiness: _AttackReadiness | None = None,
 ) -> Action:
     # The attacker ending up back in hand (rather than staying on the
     # board or dying) means the attack never actually connected -- most
@@ -898,7 +946,14 @@ def _build_attack_action(
         block, game, namer, friendly_player, before, after, interrupted
     )
     effects = _diff_effects(
-        game, namer, friendly_player, before, after, exclude=folded, order=order
+        game,
+        namer,
+        friendly_player,
+        before,
+        after,
+        exclude=folded,
+        order=order,
+        readiness=readiness,
     )
     if interrupted:
         effects.append("Angriff abgebrochen")
@@ -922,9 +977,12 @@ def _build_action(
     mana_before: int | None,
     mana_after: int | None,
     order: list[int] | None = None,
+    readiness: _AttackReadiness | None = None,
 ) -> Action:
     if block.type == BlockType.ATTACK:
-        return _build_attack_action(block, game, namer, friendly_player, before, after, order)
+        return _build_attack_action(
+            block, game, namer, friendly_player, before, after, order, readiness=readiness
+        )
 
     entity = game.find_entity_by_id(block.entity)
     controller = entity.controller if entity is not None else None
@@ -945,7 +1003,14 @@ def _build_action(
         exclude = frozenset({block.entity})
 
     effects = _diff_effects(
-        game, namer, friendly_player, before, after, exclude=exclude, order=order
+        game,
+        namer,
+        friendly_player,
+        before,
+        after,
+        exclude=exclude,
+        order=order,
+        readiness=readiness,
     )
     return Action(headline=headline, effects=effects)
 
@@ -990,7 +1055,23 @@ class _TurnBuilder:
         # (see `_hero_health`). First-write-wins, since the correct value
         # is only ever true right when the hero actually dies.
         self._frozen_hero_health: dict[int, int] = {}
+        # The turn number an entity id first reached Zone.PLAY -- first-
+        # write-wins, so a later transform (same entity id, new card via
+        # CHANGE_ENTITY) never overwrites it. See `_AttackReadiness`.
+        self._entered_play_turn: dict[int, int] = {}
+        # The turn number an entity id last attacked on -- overwritten on
+        # each attack (Windfury), only ever compared for "== this turn".
+        # See `_AttackReadiness`.
+        self._attacked_this_turn: dict[int, int] = {}
         self.turns: list[Turn] = []
+
+    def on_entity_entered_play(self, entity_id: int) -> None:
+        if self._current is None or entity_id in self._entered_play_turn:
+            return
+        self._entered_play_turn[entity_id] = self._current.number
+
+    def _readiness(self, turn_number: int) -> _AttackReadiness:
+        return _AttackReadiness(turn_number, self._entered_play_turn, self._attacked_this_turn)
 
     def _players(self, game: Game) -> tuple[Player, Player]:
         if self._me is None:
@@ -1009,7 +1090,13 @@ class _TurnBuilder:
         if self._current is not None and self._active is not None:
             me, opponent = self._players(game)
             self._current.end = _turn_snapshot(
-                me, opponent, self._active, self._card_db, self._namer, self._frozen_hero_health
+                me,
+                opponent,
+                self._active,
+                self._card_db,
+                self._namer,
+                self._readiness(self._current.number),
+                frozen=self._frozen_hero_health,
             )
             self.turns.append(self._current)
             self._current = None
@@ -1030,11 +1117,23 @@ class _TurnBuilder:
             player_name=_player_label(active, me),
             opening_draws=[],
             start=_turn_snapshot(
-                me, opponent, active, self._card_db, self._namer, self._frozen_hero_health
+                me,
+                opponent,
+                active,
+                self._card_db,
+                self._namer,
+                self._readiness(turn_number),
+                frozen=self._frozen_hero_health,
             ),
             actions=[],
             end=_turn_snapshot(
-                me, opponent, active, self._card_db, self._namer, self._frozen_hero_health
+                me,
+                opponent,
+                active,
+                self._card_db,
+                self._namer,
+                self._readiness(turn_number),
+                frozen=self._frozen_hero_health,
             ),
         )
 
@@ -1090,6 +1189,14 @@ class _TurnBuilder:
         before_entities, mana_before = before
         after_entities = _snapshot_entities(game)
         self._freeze_dead_hero_health(me, opponent, after_entities)
+        if block.type == BlockType.ATTACK:
+            # Recorded independently of the live EXHAUSTED/NUM_ATTACKS_
+            # THIS_TURN tags for the same reason `_entered_play_turn` is:
+            # a same-turn transform (CHANGE_ENTITY) resets both of those
+            # unconditionally, which would otherwise make an already-
+            # attacked minion look ready to attack again. See
+            # `_AttackReadiness`.
+            self._attacked_this_turn[block.entity] = self._current.number
         if _is_merge_only_block(block):
             self._merge_effects_into_last_action(game, me, before_entities, after_entities, order)
             return
@@ -1108,6 +1215,7 @@ class _TurnBuilder:
             mana_before,
             mana_after,
             order,
+            readiness=self._readiness(self._current.number),
         )
         self._current.actions.append(action)
 
@@ -1123,7 +1231,15 @@ class _TurnBuilder:
         whichever action caused them, not their own separate, actor-less
         entry."""
         assert self._current is not None
-        lines = _diff_effects(game, self._namer, friendly_player, before, after, order=order)
+        lines = _diff_effects(
+            game,
+            self._namer,
+            friendly_player,
+            before,
+            after,
+            order=order,
+            readiness=self._readiness(self._current.number),
+        )
         if not lines:
             return
         if self._current.actions:
@@ -1144,7 +1260,13 @@ class _TurnBuilder:
             return
         me, opponent = self._players(game)
         self._current.end = _turn_snapshot(
-            me, opponent, self._active, self._card_db, self._namer, self._frozen_hero_health
+            me,
+            opponent,
+            self._active,
+            self._card_db,
+            self._namer,
+            self._readiness(self._current.number),
+            frozen=self._frozen_hero_health,
         )
         self.turns.append(self._current)
         self._current = None
@@ -1177,11 +1299,32 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
         result = super().export_packet(packet)
         if isinstance(packet, _TOUCH_ONLY_PACKET_TYPES):
             self._touch(packet)
+            # A summoned token is often created directly into Zone.PLAY via
+            # FullEntity/ShowEntity, with no separate ZONE TAG_CHANGE for
+            # `handle_tag_change` to see -- verified against a real match
+            # (a Copybot token: "FULL_ENTITY - Creating ... tag=ZONE
+            # value=PLAY", never followed by its own TAG_CHANGE). Deliberately
+            # excludes ChangeEntity (a transform, CHANGE_ENTITY): that must
+            # never be treated as "entering play" -- the entity already has
+            # a real entered-play turn (or doesn't yet exist in play at all,
+            # which _touch's first-write-wins guard handles fine either way).
+            if isinstance(packet, (hslog_packets.FullEntity, hslog_packets.ShowEntity)):
+                self._maybe_mark_entered_play(packet)
         return result
+
+    def _maybe_mark_entered_play(self, packet: Any) -> None:
+        if self.game is None:
+            return
+        entity_id = int(coerce_to_entity_id(packet.entity))
+        entity = self.game.find_entity_by_id(entity_id)
+        if entity is not None and entity.zone == Zone.PLAY:
+            self._builder.on_entity_entered_play(entity_id)
 
     def handle_tag_change(self, packet: Any) -> Any:
         entity = super().handle_tag_change(packet)
         self._touch(packet)
+        if packet.tag == GameTag.ZONE and packet.value == Zone.PLAY:
+            self._builder.on_entity_entered_play(int(coerce_to_entity_id(packet.entity)))
         if entity is self.game and self.game is not None:
             if packet.tag == GameTag.TURN:
                 self._builder.on_turn_number(packet.value, self.game)
