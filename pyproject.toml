@@ -1,8 +1,23 @@
 [project]
 name = "hearthtrace"
 version = "0.1.0"
-description = "Native Linux Hearthstone deck tracker"
+description = "Native Linux Hearthstone tracker and replay analyzer"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+authors = [
+    { name = "Rainer Blessing" }
+]
+
+keywords = [
+    "hearthstone",
+    "linux",
+    "tracker",
+    "replay",
+    "power-log",
+]
+
 dependencies = [
     "hslog>=1.20",
     "hearthstone>=9.20",
@@ -19,6 +34,14 @@ dev = [
     "radon>=6.0",
 ]
 
+[project.scripts]
+hearthtrace = "hearthtrace.app:main"
+
+[project.urls]
+Homepage = "https://github.com/rainerblessing/hearthtrace"
+Repository = "https://github.com/rainerblessing/hearthtrace"
+Issues = "https://github.com/rainerblessing/hearthtrace/issues"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -30,13 +53,18 @@ where = ["src"]
 testpaths = ["tests"]
 
 [tool.coverage.run]
+branch = true
 source = ["src/hearthtrace"]
-omit = ["src/hearthtrace/app.py", "src/hearthtrace/ui.py"]
+omit = [
+    "src/hearthtrace/app.py",
+    "src/hearthtrace/ui.py",
+]
 
 [tool.coverage.report]
 fail_under = 90
 
 [tool.ruff]
+target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
 

@@ -86,7 +86,7 @@ export_dir = "~/HearthstoneAnalysis"
 2. **Start HearthTrace** -- either directly:
    ```bash
    cd hearthtrace
-   .venv/bin/python -m hearthtrace.app
+   .venv/bin/hearthtrace
    ```
    or install it as a desktop entry so it shows up in your app launcher
    (edit the `Exec=` path in `hearthtrace.desktop` to your own install
