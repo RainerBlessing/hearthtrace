@@ -157,6 +157,31 @@ def _install_replay_css() -> None:
         )
 
 
+def _tooltip_meta_line(info: CardInfo) -> str | None:
+    meta = []
+    if info.cost is not None:
+        meta.append(f"{info.cost} Mana")
+    if info.type_label:
+        meta.append(info.type_label)
+    if info.rarity_label:
+        meta.append(info.rarity_label)
+    return escape(" · ".join(meta)) if meta else None
+
+
+def _tooltip_stats_line(info: CardInfo) -> str | None:
+    # Spells have neither -- an empty stats line would just be a blank
+    # row between the meta line and the keywords/text, exactly the
+    # "empty stat block" the user asked to avoid for non-minions.
+    stats = []
+    if info.attack is not None and info.health is not None:
+        stats.append(f"{info.attack}/{info.health}")
+    elif info.health is not None:  # a weapon's durability/Location -- no attack
+        stats.append(str(info.health))
+    if info.race_label:
+        stats.append(info.race_label)
+    return escape(" · ".join(stats)) if stats else None
+
+
 def _card_tooltip_markup(info: CardInfo) -> str:
     # `info.text` is already sanitized into valid Pango markup (its own
     # <b>/<i> tags are meant to render, not show up literally) -- every
@@ -170,28 +195,13 @@ def _card_tooltip_markup(info: CardInfo) -> str:
     # single-line layout too "raw"/unstructured to scan at a glance.
     header = [f'<span size="large" weight="bold">{escape(info.name)}</span>']
 
-    meta = []
-    if info.cost is not None:
-        meta.append(f"{info.cost} Mana")
-    if info.type_label:
-        meta.append(info.type_label)
-    if info.rarity_label:
-        meta.append(info.rarity_label)
-    if meta:
-        header.append(escape(" · ".join(meta)))
+    meta_line = _tooltip_meta_line(info)
+    if meta_line is not None:
+        header.append(meta_line)
 
-    # Spells have neither -- an empty stats line would just be a blank
-    # row between the meta line and the keywords/text, exactly the
-    # "empty stat block" the user asked to avoid for non-minions.
-    stats = []
-    if info.attack is not None and info.health is not None:
-        stats.append(f"{info.attack}/{info.health}")
-    elif info.health is not None:  # a weapon's durability/Location -- no attack
-        stats.append(str(info.health))
-    if info.race_label:
-        stats.append(info.race_label)
-    if stats:
-        header.append(escape(" · ".join(stats)))
+    stats_line = _tooltip_stats_line(info)
+    if stats_line is not None:
+        header.append(stats_line)
 
     if info.keywords:
         header.append(f'<b>{escape(", ".join(info.keywords))}</b>')
@@ -518,7 +528,15 @@ class TrackerWindow(Adw.ApplicationWindow):
             return
         try:
             game = parse_log_at_index(entry.log_path, entry.game_index)
-        except (NoGameFoundError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - must never crash this signal handler
+            # Code-review-caught gap: this used to catch only
+            # (NoGameFoundError, OSError), narrower than the live-poll
+            # path's own blanket `except Exception` -- but hslog can raise
+            # other exception types from a malformed packet (see
+            # `export_packet`'s own `except TypeError` fix elsewhere in
+            # this file for a real example), which would otherwise
+            # propagate uncaught out of this GTK signal handler instead of
+            # showing an error dialog.
             self._show_error_dialog("Replay nicht verfügbar", str(exc))
             return
 
@@ -617,11 +635,21 @@ class TrackerWindow(Adw.ApplicationWindow):
             self._replay_pin_label.set_label("Verlauf-Ansicht (nicht die aktuelle Partie)")
         game = self._replay_game
         if game is None or not game.turns:
-            self._replay_turn_label.set_label("Keine Züge verfügbar")
+            # Code-review-caught gap: a concede/disconnect during mulligan
+            # (before STEP ever reaches MAIN_ACTION) leaves game.turns
+            # empty -- silently showing the generic "no turns" placeholder
+            # here dropped the match's own ending, the exact "log just
+            # stops with no explanation" gap this feature exists to fix.
+            match_ended = game.match_ended if game is not None else None
+            self._replay_turn_label.set_label(
+                "Kein Zug aufgezeichnet" if match_ended is not None else "Keine Züge verfügbar"
+            )
             self._replay_position_label.set_label("")
             self._replay_prev_button.set_sensitive(False)
             self._replay_next_button.set_sensitive(False)
             self._clear_box(self._replay_content_box)
+            if match_ended is not None:
+                self._replay_content_box.append(self._build_match_ended_block(match_ended))
             return
         turn = game.turns[self._replay_turn_index]
         self._replay_turn_label.set_label(f"Zug {turn.number} – {turn.player_name}")

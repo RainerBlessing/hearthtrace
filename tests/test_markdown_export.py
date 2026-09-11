@@ -480,6 +480,51 @@ def test_render_match_summary_omits_the_reason_line_when_unknown() -> None:
     assert "Verbindung" not in markdown
 
 
+def test_render_match_summary_does_not_show_keine_next_to_a_numbered_match_end_line() -> None:
+    # Code-review-caught bug: a turn with zero other actions that also
+    # ends the match used to get *both* "- (keine)" and a numbered
+    # "N. Gegner gibt auf" line -- a self-contradictory "no actions"
+    # bullet immediately followed by a numbered one.
+    game = ParsedGame(
+        own_class="SHAMAN",
+        opponent_class="MAGE",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[_turn(number=1, player_name="Gegner", actions=[])],
+        match_ended=MatchEnded(result="WON", reason="CONCEDE", actor="OPPONENT"),
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "1. Gegner gibt auf" in markdown
+    assert "- (keine)" not in markdown
+
+
+def test_render_match_summary_shows_match_end_even_with_no_recorded_turns() -> None:
+    # Code-review-caught gap: a concede/disconnect during mulligan (before
+    # STEP ever reaches MAIN_ACTION) leaves game.turns empty -- the
+    # per-turn loop never runs, so match_ended was silently dropped
+    # entirely, the exact "the log just stops" gap this feature exists to
+    # fix.
+    game = ParsedGame(
+        own_class="SHAMAN",
+        opponent_class="MAGE",
+        starting_deck=[],
+        result="LOST",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[],
+        match_ended=MatchEnded(result="LOST", reason="DISCONNECT", actor="YOU"),
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Partie beendet – Niederlage" in markdown
+    assert "Du verlierst die Verbindung" in markdown
+
+
 def test_export_match_summary_writes_a_file(tmp_path: Path) -> None:
     game = ParsedGame(
         own_class="MAGE",

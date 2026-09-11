@@ -131,19 +131,25 @@ def _render_end_snapshot(snapshot: TurnSnapshot) -> list[str]:
 
 
 def _render_actions(turn: Turn, match_ended: MatchEnded | None) -> list[str]:
-    if not turn.actions and match_ended is None:
-        return ["### Aktionen", "- (keine)"]
+    reason_headline = (
+        _match_end_action_headline(match_ended) if match_ended is not None else None
+    )
     lines = ["### Aktionen"]
-    if not turn.actions:
+    # Code-review-caught bug: "- (keine)" and a numbered match-end line
+    # (e.g. "1. Du gibst auf") used to both get appended whenever a turn
+    # with zero other actions also ended the match -- a self-contradictory
+    # "no actions" bullet immediately followed by a numbered one. Only
+    # fall back to "- (keine)" when nothing at all (not even a match-end
+    # reason) is going to be listed.
+    if not turn.actions and reason_headline is None:
         lines.append("- (keine)")
     else:
         for i, action in enumerate(turn.actions, start=1):
             lines.append(f"{i}. {action.headline}")
             lines += [f"   → {effect}" for effect in action.effects]
-    if match_ended is not None:
-        reason_headline = _match_end_action_headline(match_ended)
         if reason_headline is not None:
             lines.append(f"{len(turn.actions) + 1}. {reason_headline}")
+    if match_ended is not None:
         result_label = RESULT_LABELS.get(match_ended.result, match_ended.result)
         lines += ["", f"Partie beendet – {result_label}"]
     return lines
@@ -167,6 +173,21 @@ def _render_turn(turn: Turn, match_ended: MatchEnded | None) -> list[str]:
         *_render_end_snapshot(turn.end),
         "",
     ]
+
+
+def _render_match_end_without_turns(match_ended: MatchEnded) -> list[str]:
+    # Code-review-caught gap: a concede/disconnect during mulligan (before
+    # STEP ever reaches MAIN_ACTION) leaves game.turns empty -- the
+    # per-turn loop that would normally carry match_ended never runs, so
+    # the match's own ending was silently dropped entirely, the exact
+    # "log just stops with no explanation" gap this feature exists to fix.
+    reason_headline = _match_end_action_headline(match_ended)
+    result_label = RESULT_LABELS.get(match_ended.result, match_ended.result)
+    lines = ["## Spielende"]
+    if reason_headline is not None:
+        lines.append(reason_headline)
+    lines += ["", f"Partie beendet – {result_label}", ""]
+    return lines
 
 
 def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
@@ -205,6 +226,8 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
     for i, turn in enumerate(game.turns):
         turn_match_ended = game.match_ended if i == last_turn_index else None
         lines += _render_turn(turn, turn_match_ended)
+    if not game.turns and game.match_ended is not None:
+        lines += _render_match_end_without_turns(game.match_ended)
     if len(deck_names) >= _FULL_DECK_SIZE:
         lines += [
             "## Restdeck bei Spielende",
