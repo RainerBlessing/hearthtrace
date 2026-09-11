@@ -105,6 +105,24 @@ _MINION_FRAME_WIDTH = 76
 # on the layout already tuned for a normal-width window.
 _CONTENT_MAX_WIDTH = 1100
 
+# The Live page's own, narrower clamp width: user feedback on a real
+# screenshot -- the match-status card only ever holds two or three short
+# lines, so clamping it to the same 1100px as Replay/History (which have
+# genuinely wide content: board flowboxes, action timelines) just moved
+# the empty space from "around the card" to "inside the card, and below
+# it" instead of removing it.
+_TRACKER_MAX_WIDTH = 720
+
+# Semantic Adwaita color classes for the match-status card's result dot --
+# "success"/"warning"/"error" are stock libadwaita style classes (like
+# "accent"/"dim-label" elsewhere in this file), not custom CSS. A tie is
+# deliberately left uncolored (neither a win nor a loss).
+_RESULT_DOT_CSS_CLASS = {
+    "WON": "success",
+    "LOST": "error",
+    "CONCEDED": "error",  # the friendly player's own PLAYSTATE -- a loss
+}
+
 # Adw.ToggleGroup's own vertical padding (confirmed via its real CSS node,
 # `toggle-group` containing `toggle` children -- inspected directly rather
 # than guessed) reads as noticeably tall against this window's small
@@ -246,7 +264,10 @@ class TrackerWindow(Adw.ApplicationWindow):
         replay_scroller.set_child(self._clamp(self._build_replay_box()))
 
         self._stack = Gtk.Stack()
-        self._stack.add_named(self._clamp(self._tracker_box), "tracker")
+        tracker_clamp = Adw.Clamp()
+        tracker_clamp.set_maximum_size(_TRACKER_MAX_WIDTH)
+        tracker_clamp.set_child(self._tracker_box)
+        self._stack.add_named(tracker_clamp, "tracker")
         self._stack.add_named(history_scroller, "history")
         self._stack.add_named(replay_scroller, "replay")
         toolbar_view.set_content(self._stack)
@@ -956,8 +977,9 @@ class TrackerWindow(Adw.ApplicationWindow):
     def _render_tracker_match(self, game: ParsedGame) -> None:
         """Render the Live page's one "Aktuelle Partie" status card, plus
         state-specific content below it: an in-progress match shows live
-        health/deck state, a finished one shows the result and a way into
-        Replay -- an empty box (the old behaviour) never explained *why*
+        health/deck state below the card; a finished one puts its result
+        and a way into Replay directly in the card, with nothing else
+        below -- an empty box (the old behaviour) never explained *why*
         nothing else was shown, which read as unfinished rather than
         intentionally minimal.
         """
@@ -968,7 +990,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         turn_number = game.turns[-1].number if game.turns else 0
 
         if finished:
-            detail_text = f"{RESULT_LABELS.get(game.result, game.result)} · {turn_number} Züge"
+            detail_text = f"{turn_number} Züge"
         else:
             detail_text = f"Zug {turn_number}"
         if game.log_truncated and not finished:
@@ -977,55 +999,55 @@ class TrackerWindow(Adw.ApplicationWindow):
             # before that, not the match's true (possibly already decided)
             # current state. Showing it bare would be actively misleading.
             detail_text += " (Hearthstone-Log abgeschnitten — Status evtl. veraltet)"
-        status_card = self._build_match_status_card(own_class, opponent_class, detail_text)
+        result = game.result if finished else None
+        status_card = self._build_match_status_card(own_class, opponent_class, detail_text, result)
         self._tracker_box.append(status_card)
 
-        if finished:
-            self._tracker_box.append(self._build_finished_match_footer())
-        elif game.turns:
+        if not finished and game.turns:
             self._tracker_box.append(self._build_in_progress_match_body(game))
 
-    @staticmethod
-    def _build_match_status_card(own_class: str, opponent_class: str, detail_text: str) -> Gtk.Box:
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    def _build_match_status_card(
+        self, own_class: str, opponent_class: str, detail_text: str, result: str | None
+    ) -> Gtk.Box:
+        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         card.add_css_class("card")
-        card.set_margin_start(4)
-        card.set_margin_end(4)
 
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        inner.set_margin_top(12)
-        inner.set_margin_bottom(12)
-        inner.set_margin_start(12)
-        inner.set_margin_end(12)
-        card.append(inner)
+        text_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        text_column.set_margin_top(12)
+        text_column.set_margin_bottom(12)
+        text_column.set_margin_start(12)
+        text_column.set_margin_end(12)
+        text_column.set_hexpand(True)
+        card.append(text_column)
 
         heading = Gtk.Label(label="Aktuelle Partie", xalign=0)
         heading.add_css_class("caption")
         heading.add_css_class("dim-label")
-        inner.append(heading)
+        text_column.append(heading)
 
         matchup = Gtk.Label(label=f"{own_class} vs. {opponent_class}", xalign=0)
         matchup.add_css_class("title-4")
-        inner.append(matchup)
+        text_column.append(matchup)
 
+        detail_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        if result is not None:
+            dot = Gtk.Label(label="●")
+            dot.add_css_class(_RESULT_DOT_CSS_CLASS.get(result, "dim-label"))
+            detail_row.append(dot)
+            detail_text = f"{RESULT_LABELS.get(result, result)} · {detail_text}"
         detail = Gtk.Label(label=detail_text, xalign=0)
         detail.add_css_class("dim-label")
-        inner.append(detail)
-        return card
+        detail_row.append(detail)
+        text_column.append(detail_row)
 
-    def _build_finished_match_footer(self) -> Gtk.Box:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        message = Gtk.Label(label="Die Partie ist beendet.", xalign=0)
-        message.add_css_class("dim-label")
-        box.append(message)
-        replay_button = Gtk.Button(label="Replay ansehen")
-        replay_button.add_css_class("suggested-action")
-        replay_button.set_halign(Gtk.Align.START)
-        replay_button.connect("clicked", self._on_view_finished_replay)
-        box.append(replay_button)
-        return box
+        if result is not None:
+            replay_button = Gtk.Button(label="Replay ansehen")
+            replay_button.set_valign(Gtk.Align.END)
+            replay_button.set_margin_end(12)
+            replay_button.set_margin_bottom(12)
+            replay_button.connect("clicked", self._on_view_finished_replay)
+            card.append(replay_button)
+        return card
 
     def _on_view_finished_replay(self, _button: Gtk.Button) -> None:
         # `_update_replay_state` already keeps `_replay_game` following the
