@@ -4,6 +4,7 @@ This module isolates the rest of the app from the `hslog`/`hearthstone`
 package internals: callers only ever see `ParsedGame`.
 """
 
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -493,7 +494,16 @@ def _attacks_remaining(entity: Entity, readiness: _AttackReadiness) -> int:
     )
     if summoning_sick:
         return 0
-    allowed_attacks = 2 if entity.tags.get(GameTag.WINDFURY, 0) else 1
+    # Code-review-caught gap: only plain Windfury was checked, capping a
+    # Mega-Windfury entity (4 attacks/turn) at 2 -- the hint/keyword then
+    # incorrectly disappeared after its second attack while two more were
+    # still legal.
+    if entity.tags.get(GameTag.MEGA_WINDFURY, 0):
+        allowed_attacks = 4
+    elif entity.tags.get(GameTag.WINDFURY, 0):
+        allowed_attacks = 2
+    else:
+        allowed_attacks = 1
     return max(0, allowed_attacks - readiness.attacks_used_this_turn.get(entity.id, 0))
 
 
@@ -1125,9 +1135,18 @@ class _TurnBuilder:
         # (see `_hero_health`). First-write-wins, since the correct value
         # is only ever true right when the hero actually dies.
         self._frozen_hero_health: dict[int, int] = {}
-        # The turn number an entity id first reached Zone.PLAY -- first-
-        # write-wins, so a later transform (same entity id, new card via
-        # CHANGE_ENTITY) never overwrites it. See `_AttackReadiness`.
+        # The turn number an entity id most recently reached Zone.PLAY.
+        # Updated (not first-write-wins) on every genuine PLAY-zone entry
+        # -- code-review-caught: a minion bounced to hand and replayed the
+        # same match keeps its entity id, and Hearthstone really does
+        # reset its summoning sickness on the replay, so the *latest*
+        # entry must win. A transform (same entity id, new card via
+        # CHANGE_ENTITY) is a different case handled separately, at the
+        # call site in `handle_tag_change` (`_was_already_in_play`): its
+        # own fresh tag dump re-asserts ZONE=PLAY without the entity ever
+        # having actually left play, so that specific re-assertion is
+        # never even passed to `on_entity_entered_play`. See
+        # `_AttackReadiness`.
         self._entered_play_turn: dict[int, int] = {}
         # entity_id -> how many attacks it has made this turn. Reset to
         # empty at the start of every turn (`on_turn_ready`) -- unlike
@@ -1157,9 +1176,20 @@ class _TurnBuilder:
         self.match_end_player_id = entity_id
 
     def on_entity_entered_play(self, entity_id: int) -> None:
-        if self._current is None or entity_id in self._entered_play_turn:
+        # Code-review-caught gap: a start-of-turn trigger can summon a
+        # minion before `STEP` reaches MAIN_ACTION (`self._current` is
+        # still None in that window, set only by `on_turn_ready`) -- the
+        # entry would otherwise be dropped entirely, permanently hiding
+        # that minion's real summoning sickness. `_pending_turn_number` is
+        # already set by then (`on_turn_number` sets it as soon as the
+        # `TURN` tag itself changes, before MAIN_READY/MAIN_START/
+        # MAIN_ACTION), so it's the correct turn number to use here too.
+        turn_number = (
+            self._current.number if self._current is not None else self._pending_turn_number
+        )
+        if turn_number is None:
             return
-        self._entered_play_turn[entity_id] = self._current.number
+        self._entered_play_turn[entity_id] = turn_number
 
     def _readiness(self, turn_number: int) -> _AttackReadiness:
         return _AttackReadiness(
@@ -1398,7 +1428,7 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
     def export_packet(self, packet: Any) -> Any:
         try:
             result = super().export_packet(packet)
-        except TypeError:
+        except TypeError as exc:
             # Verified against a real match: a card whose internal effect id
             # contains an apostrophe (Al'Akir, Lord of Storms' "SpawntoHand"
             # sub-spell, SpellPrefabGUID=CATAFX_Al'Akir_SpawntoHand:...)
@@ -1408,7 +1438,11 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
             # raises. This is a malformed *packet* (hslog's own parser lost
             # its place), not a malformed *line* (already handled leniently
             # in `parse_log`'s per-line read) -- skip just this one packet
-            # rather than losing the rest of the match.
+            # rather than losing the rest of the match. Code-review-caught
+            # gap: this used to drop the packet with zero diagnostic
+            # output anywhere, indistinguishable from the match simply
+            # never containing that event.
+            print(f"hearthtrace: skipped a malformed packet ({packet!r}): {exc}", file=sys.stderr)
             return None
         if isinstance(packet, _TOUCH_ONLY_PACKET_TYPES):
             self._touch(packet)
@@ -1433,11 +1467,33 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
         if entity is not None and entity.zone == Zone.PLAY:
             self._builder.on_entity_entered_play(entity_id)
 
+    def _is_zone_play_reassertion(self, packet: Any, is_zone_play: bool) -> bool:
+        """True when `packet` re-asserts ZONE=PLAY for an entity that was
+        already in play -- a transform's (CHANGE_ENTITY) fresh tag dump
+        does exactly this, even though the entity never actually left
+        play. Must be checked *before* `super().handle_tag_change(packet)`
+        applies the tag, or the entity's zone would already read PLAY
+        either way. This is the only way to tell that reassertion apart
+        from a genuine new entry (summon, or a bounced minion replayed
+        later in the same match) -- both of which must still update
+        `_entered_play_turn`.
+        """
+        if not is_zone_play or self.game is None:
+            return False
+        existing = self.game.find_entity_by_id(int(coerce_to_entity_id(packet.entity)))
+        return existing is not None and existing.zone == Zone.PLAY
+
     def handle_tag_change(self, packet: Any) -> Any:
+        is_zone_play = packet.tag == GameTag.ZONE and packet.value == Zone.PLAY
+        is_reassertion = self._is_zone_play_reassertion(packet, is_zone_play)
         entity = super().handle_tag_change(packet)
         self._touch(packet)
-        if packet.tag == GameTag.ZONE and packet.value == Zone.PLAY:
+        if is_zone_play and not is_reassertion:
             self._builder.on_entity_entered_play(int(coerce_to_entity_id(packet.entity)))
+        self._dispatch_turn_or_playstate_change(entity, packet)
+        return entity
+
+    def _dispatch_turn_or_playstate_change(self, entity: Any, packet: Any) -> None:
         if entity is self.game and self.game is not None:
             if packet.tag == GameTag.TURN:
                 self._builder.on_turn_number(packet.value, self.game)
@@ -1445,7 +1501,6 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
                 self._builder.on_turn_ready(self.game)
         elif isinstance(entity, Player) and packet.tag == GameTag.PLAYSTATE:
             self._builder.on_playstate_changed(entity.id, packet.value)
-        return entity
 
     def handle_block(self, packet: Any) -> None:
         is_top = self._depth == 0

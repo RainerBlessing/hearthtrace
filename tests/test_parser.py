@@ -18,6 +18,7 @@ from hearthtrace.parser import (
     Turn,
     TurnSnapshot,
     _AttackReadiness,
+    _attacks_remaining,
     _build_attack_action,
     _class_name,
     _deck_status,
@@ -697,9 +698,15 @@ def test_parse_log_does_not_grant_a_phantom_attack_after_windfury_is_silenced() 
     assert "Windfury" not in al_akir.keywords
 
 
-def test_parse_log_survives_a_malformed_subspell_packet_from_an_apostrophe_in_a_card_id() -> None:
+def test_parse_log_survives_a_malformed_subspell_packet_from_an_apostrophe_in_a_card_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     game = parse_log(APOSTROPHE_SUBSPELL_FIXTURE)
     assert len(game.turns) > 0
+    # Code-review-caught gap: the skipped packet used to leave zero
+    # diagnostic output anywhere, indistinguishable from the match simply
+    # never containing that event.
+    assert "skipped a malformed packet" in capsys.readouterr().err
 
 
 def test_minion_state_exposes_attacks_remaining_as_a_count_not_just_a_keyword() -> None:
@@ -724,6 +731,31 @@ def test_minion_state_reports_zero_attacks_remaining_once_windfury_is_fully_used
     al_akir = next(m for m in turn.end.board.own if "Herr der Stürme" in m.name)
     assert al_akir.attacks_remaining == 0
     assert "kann angreifen" not in al_akir.keywords
+
+
+def test_attacks_remaining_allows_four_attacks_for_mega_windfury() -> None:
+    # Code-review-caught gap: only plain WINDFURY was checked, capping a
+    # Mega-Windfury entity at 2 allowed attacks instead of 4 -- the hint/
+    # keyword incorrectly disappeared after its second attack while two
+    # more were still legal.
+    game, friendly, _opponent = _make_game_with_players()
+    entity = _register_card(
+        game, entity_id=1, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
+    )
+    entity.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    entity.tag_change(GameTag.ATK, 3)
+    entity.tag_change(GameTag.HEALTH, 3)
+    entity.tag_change(GameTag.MEGA_WINDFURY, 1)
+
+    readiness = _AttackReadiness(
+        turn_number=5, entered_play_turn={1: 3}, attacks_used_this_turn={1: 3}
+    )
+    assert _attacks_remaining(entity, readiness) == 1
+
+    readiness_after_all_four = _AttackReadiness(
+        turn_number=5, entered_play_turn={1: 3}, attacks_used_this_turn={1: 4}
+    )
+    assert _attacks_remaining(entity, readiness_after_all_four) == 0
 
 
 def test_minion_state_exposes_script_data_num_1_for_a_real_multi_variant_card() -> None:
@@ -752,6 +784,39 @@ def test_parse_log_reports_no_match_ended_while_a_match_is_still_in_progress() -
     game = parse_log(APOSTROPHE_SUBSPELL_FIXTURE)
     assert game.result == "PLAYING"
     assert game.match_ended is None
+
+
+def test_turn_builder_on_entity_entered_play_updates_on_a_later_replay() -> None:
+    # Code-review-caught gap: a minion bounced to hand and replayed later
+    # in the same match keeps its entity id, and Hearthstone really does
+    # reset its summoning sickness on the replay -- first-write-wins would
+    # have kept the *original* play turn forever, permanently hiding the
+    # replayed minion's real summoning sickness.
+    builder = _TurnBuilder(friendly_id=2, card_db={})
+
+    builder._current = SimpleNamespace(number=3)
+    builder.on_entity_entered_play(42)
+    assert builder._entered_play_turn[42] == 3
+
+    builder._current = SimpleNamespace(number=8)
+    builder.on_entity_entered_play(42)  # bounced earlier, replayed turn 8
+    assert builder._entered_play_turn[42] == 8
+
+
+def test_turn_builder_on_entity_entered_play_uses_pending_turn_before_main_action() -> None:
+    # Code-review-caught gap: a start-of-turn trigger can summon a minion
+    # before STEP reaches MAIN_ACTION (self._current is still None then,
+    # only set by on_turn_ready) -- the entry was silently dropped
+    # entirely, permanently hiding that minion's real summoning sickness
+    # for the rest of the match. on_turn_number already sets
+    # _pending_turn_number as soon as the TURN tag itself changes, well
+    # before MAIN_READY/MAIN_START/MAIN_ACTION.
+    builder = _TurnBuilder(friendly_id=2, card_db={})
+
+    assert builder._current is None
+    builder._pending_turn_number = 5
+    builder.on_entity_entered_play(99)
+    assert builder._entered_play_turn[99] == 5
 
 
 def test_turn_builder_on_playstate_changed_is_first_write_wins() -> None:
