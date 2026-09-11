@@ -2,6 +2,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from hearthtrace.markdown_export import export_match_summary
 from hearthtrace.match_history import (
     MatchHistoryEntry,
@@ -227,6 +229,25 @@ def test_load_match_history_survives_a_malformed_index_entry(tmp_path: Path) -> 
     assert entries[good.name].game_index == 1
     assert entries[bad.name].game_index is None
     assert entries[bad.name].log_path is None
+
+
+def test_load_match_history_logs_a_corrupt_replay_index_instead_of_hiding_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Code-review-caught gap: a corrupt/unreadable replay_index.json used
+    # to be swallowed with zero diagnostic output, indistinguishable from
+    # the normal "no index file yet" case -- every Verlauf entry silently
+    # lost its "Replay ansehen" link with no way to tell why.
+    export_dir = tmp_path
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "replay_index.json").write_text("not valid json{")
+    _write_export(export_dir, "2026-09-07_13-32-33_WON.md", "SHAMAN", "SHAMAN", [1])
+
+    entries = load_match_history(export_dir, state_dir=state_dir)
+
+    assert entries[0].log_path is None  # degrades gracefully, no crash
+    assert "replay_index.json" in capsys.readouterr().err
 
 
 def test_display_class_spaces_out_the_two_compound_class_names() -> None:

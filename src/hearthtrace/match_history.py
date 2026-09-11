@@ -10,6 +10,7 @@ exported before this feature existed.
 
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -117,9 +118,17 @@ def record_replay_source(
 
 
 def _load_replay_index(state_dir: Path) -> dict[str, dict[str, Any]]:
+    index_path = state_dir / _REPLAY_INDEX_FILENAME
     try:
-        loaded = json.loads((state_dir / _REPLAY_INDEX_FILENAME).read_text())
-    except (OSError, json.JSONDecodeError):
+        loaded = json.loads(index_path.read_text())
+    except FileNotFoundError:
+        return {}  # the normal, expected case -- no replay links recorded yet
+    except (OSError, json.JSONDecodeError) as exc:
+        # Code-review-caught gap: used to swallow this with zero
+        # diagnostic output, indistinguishable from the expected
+        # FileNotFoundError case above -- every Verlauf entry silently
+        # loses its "Replay ansehen" link with no way to tell why.
+        print(f"hearthtrace: could not read {index_path}: {exc}", file=sys.stderr)
         return {}
     return loaded if isinstance(loaded, dict) else {}
 
