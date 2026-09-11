@@ -138,6 +138,15 @@ class MinionState:
     # use this convention -- see `card_info.card_info`'s own
     # `script_data_num_1` parameter for where this is actually used.
     script_data_num_1: int = 0
+    # User-reported (real match): "attacks_remaining > 0" alone doesn't
+    # mean every legal target is available -- a freshly played Rush
+    # minion (no Charge) can attack this turn, but only a minion, not the
+    # enemy hero, until its *next* turn. `_can_attack_hero` (which
+    # computes this) returns False once attacks_remaining is 0 too, same
+    # as "can attack anything" would be -- the dataclass default here
+    # (True) only matters for a caller constructing a MinionState
+    # directly without going through `_minion_state`, e.g. a test.
+    can_attack_hero: bool = True
 
 
 @dataclass
@@ -507,10 +516,31 @@ def _attacks_remaining(entity: Entity, readiness: _AttackReadiness) -> int:
     return max(0, allowed_attacks - readiness.attacks_used_this_turn.get(entity.id, 0))
 
 
+def _can_attack_hero(entity: Entity, readiness: _AttackReadiness) -> bool:
+    """Whether an attack-ready entity may legally target the enemy hero --
+    not just "can it attack at all". User-reported (real match): Hearthstone
+    itself rejected an attack on the opposing hero as "not a valid target"
+    with a freshly-played Al'Akir, Lord of Storms (Rush, no Charge) -- Rush
+    grants an immediate attack, but only against minions, not the enemy
+    hero, until the entity's *next* turn. `attacks_remaining > 0` alone
+    ("kann angreifen"/"bereit") doesn't capture that distinction, which
+    could otherwise mislead a future automated "missed lethal" analysis
+    into flagging a Rush-restricted attack as a missed hero attack.
+    """
+    if _attacks_remaining(entity, readiness) <= 0:
+        return False
+    entered_this_turn = readiness.entered_play_turn.get(entity.id) == readiness.turn_number
+    has_charge = entity.tags.get(GameTag.CHARGE, 0)
+    has_rush = entity.tags.get(GameTag.RUSH, 0)
+    return not (entered_this_turn and has_rush and not has_charge)
+
+
 def _minion_keywords(entity: Entity, readiness: _AttackReadiness) -> list[str]:
     keywords = [label for tag, label in _KEYWORD_TAGS if entity.tags.get(tag, 0)]
     if _attacks_remaining(entity, readiness) > 0:
         keywords.append("kann angreifen")
+        if not _can_attack_hero(entity, readiness):
+            keywords.append("nur Diener")
     return keywords
 
 
@@ -526,6 +556,7 @@ def _minion_state(
         card_id=entity.card_id or "",
         attacks_remaining=_attacks_remaining(entity, readiness),
         script_data_num_1=entity.tags.get(GameTag.TAG_SCRIPT_DATA_NUM_1, 0),
+        can_attack_hero=_can_attack_hero(entity, readiness),
     )
 
 

@@ -20,6 +20,7 @@ from hearthtrace.parser import (
     _AttackReadiness,
     _attacks_remaining,
     _build_attack_action,
+    _can_attack_hero,
     _class_name,
     _deck_status,
     _diff_effects,
@@ -756,6 +757,71 @@ def test_attacks_remaining_allows_four_attacks_for_mega_windfury() -> None:
         turn_number=5, entered_play_turn={1: 3}, attacks_used_this_turn={1: 4}
     )
     assert _attacks_remaining(entity, readiness_after_all_four) == 0
+
+
+def test_can_attack_hero_is_false_for_a_freshly_played_rush_minion() -> None:
+    # User-reported (real match): Hearthstone itself rejected an attack on
+    # the enemy hero as "not a valid target" with a freshly-played Al'Akir,
+    # Lord of Storms (Rush, no Charge) -- Rush allows attacking this turn,
+    # but only minions, not the enemy hero, until the entity's next turn.
+    # "kann angreifen"/attacks_remaining alone can't tell that apart from
+    # an unrestricted attack.
+    game, friendly, _opponent = _make_game_with_players()
+    entity = _register_card(
+        game, entity_id=1, card_id="CATA_153", controller=friendly, zone=Zone.PLAY
+    )
+    entity.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    entity.tag_change(GameTag.ATK, 10)
+    entity.tag_change(GameTag.HEALTH, 6)
+    entity.tag_change(GameTag.RUSH, 1)
+    entity.tag_change(GameTag.WINDFURY, 1)
+
+    readiness_this_turn = _AttackReadiness(
+        turn_number=19, entered_play_turn={1: 19}, attacks_used_this_turn={}
+    )
+    assert _can_attack_hero(entity, readiness_this_turn) is False
+    assert "nur Diener" in _minion_keywords(entity, readiness_this_turn)
+
+    # The same minion, one turn later: Rush no longer restricts it.
+    readiness_next_turn = _AttackReadiness(
+        turn_number=21, entered_play_turn={1: 19}, attacks_used_this_turn={}
+    )
+    assert _can_attack_hero(entity, readiness_next_turn) is True
+    assert "nur Diener" not in _minion_keywords(entity, readiness_next_turn)
+
+
+def test_can_attack_hero_is_true_for_a_freshly_played_charge_minion() -> None:
+    # Charge (unlike Rush) grants an unrestricted attack immediately,
+    # hero included -- even if the same entity also happens to have Rush.
+    game, friendly, _opponent = _make_game_with_players()
+    entity = _register_card(
+        game, entity_id=1, card_id="CS2_182", controller=friendly, zone=Zone.PLAY
+    )
+    entity.tag_change(GameTag.CARDTYPE, CardType.MINION)
+    entity.tag_change(GameTag.ATK, 3)
+    entity.tag_change(GameTag.HEALTH, 3)
+    entity.tag_change(GameTag.RUSH, 1)
+    entity.tag_change(GameTag.CHARGE, 1)
+
+    readiness = _AttackReadiness(
+        turn_number=5, entered_play_turn={1: 5}, attacks_used_this_turn={}
+    )
+    assert _can_attack_hero(entity, readiness) is True
+    assert "nur Diener" not in _minion_keywords(entity, readiness)
+
+
+def test_parse_log_marks_a_rush_minions_unused_attack_as_minions_only() -> None:
+    # Same real match ground truth as the review-hint fixture above (The
+    # One-Amalgam Band's battlecry rolled Rush and Windfury, not Charge):
+    # turn 30 ends with both of its attacks unused *and* hero-restricted
+    # at once -- confirms the two facts combine correctly end-to-end, not
+    # just in isolation.
+    game = parse_log(UNUSED_ATTACK_REVIEW_HINT_FIXTURE)
+    turn = next(t for t in game.turns if t.number == 30)
+    orchestra = next(m for m in turn.end.board.own if "Orchester" in m.name)
+    assert orchestra.attacks_remaining == 2
+    assert orchestra.can_attack_hero is False
+    assert "nur Diener" in orchestra.keywords
 
 
 def test_minion_state_exposes_script_data_num_1_for_a_real_multi_variant_card() -> None:

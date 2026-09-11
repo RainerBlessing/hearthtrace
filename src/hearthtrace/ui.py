@@ -929,11 +929,12 @@ class TrackerWindow(Adw.ApplicationWindow):
             chip_row.set_halign(Gtk.Align.CENTER)
             for keyword in minion.keywords:
                 chip_text = _KEYWORD_CHIP_LABELS.get(keyword, keyword)
-                # "bereit" is a temporary state indicator (can this minion
-                # attack right now?), not a printed card keyword like
-                # "Spott" -- user feedback: it read as equally important
-                # as a real keyword, deliberately muted here instead.
-                muted = keyword == "kann angreifen"
+                # "bereit"/"nur Diener" are temporary state indicators (can
+                # this minion attack right now, and legally hit the enemy
+                # hero?), not printed card keywords like "Spott" -- user
+                # feedback: they read as equally important as a real
+                # keyword, deliberately muted here instead.
+                muted = keyword in ("kann angreifen", "nur Diener")
                 chip_row.append(TrackerWindow._build_keyword_chip(chip_text, muted=muted))
             content.append(chip_row)
 
