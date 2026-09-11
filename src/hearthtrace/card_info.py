@@ -195,10 +195,33 @@ def _keywords_of(card: Any) -> list[str]:
     return [label for attr, label in _KEYWORD_ATTRS if getattr(card, attr, False)]
 
 
+def _select_text_variant(description: str, script_data_num_1: int) -> str:
+    """Some cards' printed text is several "@"-joined variants for
+    different upgrade stages (an "announce N more times" token) --
+    concatenating all of them (as `sanitize_description` alone would)
+    showed every upgrade stage's text and hint at once, user-reported on
+    a real screenshot (Soldat von Al'Akir/Soldier of Al'Akir). Verified
+    against that same real match's raw entity tags: the currently active
+    variant is `entity.tags[TAG_SCRIPT_DATA_NUM_1] - 1` (1-indexed tag
+    value -> 0-indexed variant), and that same raw value is also exactly
+    the number such a variant's own text names (e.g. "+{0} Angriff")
+    -- not just an index. Deliberately scoped to only this "@"-joined
+    case; a single-variant card's `{0}` (e.g. a Herald-style summon)
+    still falls through to `sanitize_description`'s generic, unrelated
+    fallback, since a single verified card family doesn't generalize to
+    every possible use of "{0}" in the database.
+    """
+    if "@" not in description:
+        return description
+    variants = description.split("@")
+    index = max(0, min(len(variants) - 1, script_data_num_1 - 1))
+    return variants[index].replace("{0}", str(script_data_num_1))
+
+
 _STATS_CARD_TYPES = (CardType.MINION, CardType.WEAPON, CardType.LOCATION)
 
 
-def card_info(card_id: str, card_db: Any) -> CardInfo:
+def card_info(card_id: str, card_db: Any, *, script_data_num_1: int = 0) -> CardInfo:
     """Looks up `card_id` in `card_db` (as returned by
     `hearthstone.cardxml.load`). Never raises.
 
@@ -209,6 +232,12 @@ def card_info(card_id: str, card_db: Any) -> CardInfo:
     "Unbekannte Karte", while a `card_id` the local card_db just doesn't
     have an entry for falls back to showing that id as the name, same as
     the chip already does.
+
+    `script_data_num_1` (the live entity's own `MinionState.
+    script_data_num_1`, default 0 for a caller with no entity context,
+    e.g. a hand card) selects among a multi-variant card's "@"-joined
+    text stages -- see `_select_text_variant`. A card that doesn't use
+    that convention ignores this parameter entirely.
     """
     if not card_id:
         return CardInfo(
@@ -244,7 +273,8 @@ def card_info(card_id: str, card_db: Any) -> CardInfo:
     health = card.health if card.type in _STATS_CARD_TYPES else None
     attack = card.atk if card.type in (CardType.MINION, CardType.WEAPON) else None
     keywords = _keywords_of(card)
-    text = _strip_leading_keyword_prefix(sanitize_description(card.description), keywords)
+    variant = _select_text_variant(card.description or "", script_data_num_1)
+    text = _strip_leading_keyword_prefix(sanitize_description(variant), keywords)
 
     return CardInfo(
         name=card.name,

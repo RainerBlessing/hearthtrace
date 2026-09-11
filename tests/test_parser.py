@@ -726,6 +726,19 @@ def test_minion_state_reports_zero_attacks_remaining_once_windfury_is_fully_used
     assert "kann angreifen" not in al_akir.keywords
 
 
+def test_minion_state_exposes_script_data_num_1_for_a_real_multi_variant_card() -> None:
+    # Same match: Soldat von Al'Akir/Soldier of Al'Akir uses this raw tag
+    # both to pick which "@"-joined card-text variant applies and as the
+    # literal number that variant's own text names (see card_info.py's
+    # `_select_text_variant`) -- exposed here as a plain live fact, same
+    # as `attacks_remaining`, with the card-text interpretation left to
+    # card_info.py.
+    game = parse_log(OPPONENT_CONCEDE_FIXTURE)
+    turn = next(t for t in game.turns if t.number == 11)
+    soldier = next(m for m in turn.end.board.own if m.name == "Soldat von Al’Akir #6")
+    assert soldier.script_data_num_1 == 2
+
+
 def test_parse_log_reports_a_conceding_opponent_from_the_live_playstate_change() -> None:
     game = parse_log(OPPONENT_CONCEDE_FIXTURE)
     assert game.result == "WON"

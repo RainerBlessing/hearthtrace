@@ -196,10 +196,15 @@ def _card_tooltip_markup(info: CardInfo) -> str:
     if info.keywords:
         header.append(f'<b>{escape(", ".join(info.keywords))}</b>')
 
-    lines = ["\n".join(header)]
-    if info.text:
-        lines.append(info.text)
-    return "\n\n".join(lines)
+    if not info.text:
+        return "\n".join(header)
+    # A small explicit spacer (rather than just a blank line) between the
+    # header block and the effect text, plus a slightly smaller size for
+    # the text itself -- user feedback: wanted a bit more breathing room
+    # there, and the body text read as competing with the header rather
+    # than clearly secondary to it.
+    spacer = '<span size="4000"> </span>'
+    return "\n".join(header) + f"\n{spacer}\n" + f'<span size="small">{info.text}</span>'
 
 
 class TrackerWindow(Adw.ApplicationWindow):
@@ -233,7 +238,13 @@ class TrackerWindow(Adw.ApplicationWindow):
         # card_info() lookup and markup string on every single Replay
         # re-render (every ~2s poll tick while following the live match,
         # on top of every turn/stage navigation).
-        self._card_tooltip_markup_cache: dict[str, str] = {}
+        # Keyed by (card_id, script_data_num_1), not just card_id: a
+        # multi-variant card's tooltip text depends on the specific
+        # entity's own live tag value too (see `card_info.card_info`'s
+        # `script_data_num_1` parameter) -- caching by card_id alone would
+        # serve one entity's variant text to a different entity of the
+        # same card at a different upgrade stage.
+        self._card_tooltip_markup_cache: dict[tuple[str, int], str] = {}
         # The most recently parsed game and which of its turns Replay is
         # currently showing -- kept independent of `_last_log_path`/
         # `_last_log_mtime` (which gate *whether* to re-parse) since Replay
@@ -890,7 +901,12 @@ class TrackerWindow(Adw.ApplicationWindow):
             chip_row.set_halign(Gtk.Align.CENTER)
             for keyword in minion.keywords:
                 chip_text = _KEYWORD_CHIP_LABELS.get(keyword, keyword)
-                chip_row.append(TrackerWindow._build_keyword_chip(chip_text))
+                # "bereit" is a temporary state indicator (can this minion
+                # attack right now?), not a printed card keyword like
+                # "Spott" -- user feedback: it read as equally important
+                # as a real keyword, deliberately muted here instead.
+                muted = keyword == "kann angreifen"
+                chip_row.append(TrackerWindow._build_keyword_chip(chip_text, muted=muted))
             content.append(chip_row)
 
         for setter in (
@@ -910,7 +926,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         # keeps it at its own natural/requested width regardless of how
         # much room the row actually has.
         frame.set_halign(Gtk.Align.START)
-        self._attach_card_tooltip(frame, minion.card_id)
+        self._attach_card_tooltip(frame, minion.card_id, minion.script_data_num_1)
         return frame
 
     def _build_hand_flowbox(self, cards: list[HandCard]) -> Gtk.FlowBox:
@@ -933,7 +949,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         return frame
 
     @staticmethod
-    def _build_keyword_chip(text: str) -> Gtk.Frame:
+    def _build_keyword_chip(text: str, *, muted: bool = False) -> Gtk.Frame:
         label = Gtk.Label(label=text)
         label.add_css_class("caption")
         label.set_margin_top(0)
@@ -946,9 +962,13 @@ class TrackerWindow(Adw.ApplicationWindow):
         # chips) or box (keyword row) would otherwise stretch this to fill
         # leftover space in a sparse row/hand instead of sizing to content.
         frame.set_halign(Gtk.Align.START)
+        if muted:
+            frame.set_opacity(0.6)
         return frame
 
-    def _attach_card_tooltip(self, widget: Gtk.Widget, card_id: str) -> None:
+    def _attach_card_tooltip(
+        self, widget: Gtk.Widget, card_id: str, script_data_num_1: int = 0
+    ) -> None:
         """Hover shows a native GTK tooltip (built-in delay/positioning/
         dismiss); click pins the same content open in a popover (GTK's
         default `autohide` closes it on an outside click, matching "click
@@ -957,10 +977,12 @@ class TrackerWindow(Adw.ApplicationWindow):
         per-card chips, so there's nothing to attach a tooltip to."""
         if not card_id:
             return
-        markup = self._card_tooltip_markup_cache.get(card_id)
+        cache_key = (card_id, script_data_num_1)
+        markup = self._card_tooltip_markup_cache.get(cache_key)
         if markup is None:
-            markup = _card_tooltip_markup(card_info(card_id, self._card_db))
-            self._card_tooltip_markup_cache[card_id] = markup
+            info = card_info(card_id, self._card_db, script_data_num_1=script_data_num_1)
+            markup = _card_tooltip_markup(info)
+            self._card_tooltip_markup_cache[cache_key] = markup
         widget.set_tooltip_markup(markup)
 
         label = Gtk.Label(label=markup, use_markup=True, wrap=True, xalign=0)

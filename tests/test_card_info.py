@@ -1,6 +1,6 @@
 from hearthstone.cardxml import load as load_cards
 
-from hearthtrace.card_info import CardInfo, card_info, sanitize_description
+from hearthtrace.card_info import CardInfo, _select_text_variant, card_info, sanitize_description
 
 _CARD_DB, _ = load_cards(locale="deDE")
 
@@ -74,6 +74,42 @@ def test_card_info_resolves_an_unresolved_herald_placeholder_and_drops_the_leadi
     assert info.text == "<b>Kampfschrei:</b> <b>Kündigt</b> einen Diener an."
     assert "{0}" not in info.text
     assert "Spott" not in info.text
+
+
+def test_card_info_renders_only_the_active_upgrade_variant() -> None:
+    # User-reported (real screenshot): Soldat von Al'Akir's tooltip showed
+    # all three "@"-joined upgrade-stage texts concatenated, including
+    # each stage's own "Zum Aufwerten N mal ankündigen" hint. Verified
+    # against the real match's raw entity tags: the active stage is
+    # `TAG_SCRIPT_DATA_NUM_1 - 1`, and that same raw value is also the
+    # literal number named in that stage's own text.
+    base = card_info("CATA_565t", _CARD_DB, script_data_num_1=1)
+    assert base.text == (
+        "Benachbarte Diener haben +1 Angriff. "
+        "<i>Zum Aufwerten zweimal <b>ankündigen</b>.</i>"
+    )
+    assert "@" not in base.text
+
+    once_announced = card_info("CATA_565t", _CARD_DB, script_data_num_1=2)
+    assert once_announced.text == (
+        "Benachbarte Diener haben +2 Angriff. <i>Zum Aufwerten einmal <b>ankündigen</b>.</i>"
+    )
+
+    fully_upgraded = card_info("CATA_565t", _CARD_DB, script_data_num_1=3)
+    assert fully_upgraded.text == "Benachbarte Diener\nhaben +3 Angriff."
+    assert "ankündigen" not in fully_upgraded.text
+
+
+def test_select_text_variant_leaves_a_single_variant_card_untouched() -> None:
+    assert _select_text_variant("Kein Trenner hier.", script_data_num_1=0) == "Kein Trenner hier."
+
+
+def test_select_text_variant_clamps_an_out_of_range_value() -> None:
+    # An unexpectedly large or missing (0) script_data_num_1 must still
+    # pick a real variant, not raise or return an empty string.
+    variants = "eins@zwei@drei"
+    assert _select_text_variant(variants, script_data_num_1=0) == "eins"
+    assert _select_text_variant(variants, script_data_num_1=99) == "drei"
 
 
 def test_card_info_falls_back_for_an_empty_card_id() -> None:

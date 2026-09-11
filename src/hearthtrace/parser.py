@@ -128,6 +128,15 @@ class MinionState:
     # minion can end a turn with an unused attack, not just a Windfury
     # one, so the hint (and this field) must not special-case Windfury.
     attacks_remaining: int = 0
+    # Raw `GameTag.TAG_SCRIPT_DATA_NUM_1` value -- used by some cards
+    # (verified against a real match: Soldat von Al'Akir/Soldier of
+    # Al'Akir) to pick which of several "@"-joined text variants in the
+    # card database currently applies (an "announce this N more times to
+    # upgrade" token), and as the literal number such a variant's own
+    # text names (e.g. its "+N" buff amount). 0 for a card that doesn't
+    # use this convention -- see `card_info.card_info`'s own
+    # `script_data_num_1` parameter for where this is actually used.
+    script_data_num_1: int = 0
 
 
 @dataclass
@@ -506,6 +515,7 @@ def _minion_state(
         keywords=_minion_keywords(entity, readiness),
         card_id=entity.card_id or "",
         attacks_remaining=_attacks_remaining(entity, readiness),
+        script_data_num_1=entity.tags.get(GameTag.TAG_SCRIPT_DATA_NUM_1, 0),
     )
 
 
