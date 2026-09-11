@@ -7,7 +7,15 @@ from typing import Any
 from hearthstone.cardxml import load as load_cards
 
 from hearthtrace import deck_state
-from hearthtrace.parser import HandState, MinionState, ParsedGame, Turn, TurnSnapshot, WeaponState
+from hearthtrace.parser import (
+    HandState,
+    MatchEnded,
+    MinionState,
+    ParsedGame,
+    Turn,
+    TurnSnapshot,
+    WeaponState,
+)
 
 # Public: also used by match_history.py to label a past match's result
 # consistently with how it reads in the export itself.
@@ -18,6 +26,23 @@ RESULT_LABELS = {
     "CONCEDED": "Aufgegeben",
     "UNKNOWN": "Unbekannt",
 }
+
+# Present-tense, matching the existing action-headline style ("X gespielt",
+# "X beschworen") -- only for a reason we're actually confident about (see
+# `MatchEnded`'s own docstring). Missing (reason, actor) combinations (e.g.
+# reason == "UNKNOWN", or actor is None) deliberately have no entry here --
+# `_match_end_action_headline` returns None for those, and no numbered
+# action line is added, only the "Partie beendet" summary below it.
+_MATCH_END_ACTION_HEADLINES: dict[tuple[str, str | None], str] = {
+    ("CONCEDE", "YOU"): "Du gibst auf",
+    ("CONCEDE", "OPPONENT"): "Gegner gibt auf",
+    ("DISCONNECT", "YOU"): "Du verlierst die Verbindung",
+    ("DISCONNECT", "OPPONENT"): "Gegner verliert die Verbindung",
+}
+
+
+def _match_end_action_headline(match_ended: MatchEnded) -> str | None:
+    return _MATCH_END_ACTION_HEADLINES.get((match_ended.reason, match_ended.actor))
 
 # A real constructed-format deck always has exactly 30 cards. `starting_deck`
 # only contains cards actually seen (drawn, played, revealed) by the end of
@@ -105,13 +130,22 @@ def _render_end_snapshot(snapshot: TurnSnapshot) -> list[str]:
     ]
 
 
-def _render_actions(turn: Turn) -> list[str]:
-    if not turn.actions:
+def _render_actions(turn: Turn, match_ended: MatchEnded | None) -> list[str]:
+    if not turn.actions and match_ended is None:
         return ["### Aktionen", "- (keine)"]
     lines = ["### Aktionen"]
-    for i, action in enumerate(turn.actions, start=1):
-        lines.append(f"{i}. {action.headline}")
-        lines += [f"   → {effect}" for effect in action.effects]
+    if not turn.actions:
+        lines.append("- (keine)")
+    else:
+        for i, action in enumerate(turn.actions, start=1):
+            lines.append(f"{i}. {action.headline}")
+            lines += [f"   → {effect}" for effect in action.effects]
+    if match_ended is not None:
+        reason_headline = _match_end_action_headline(match_ended)
+        if reason_headline is not None:
+            lines.append(f"{len(turn.actions) + 1}. {reason_headline}")
+        result_label = RESULT_LABELS.get(match_ended.result, match_ended.result)
+        lines += ["", f"Partie beendet – {result_label}"]
     return lines
 
 
@@ -121,14 +155,14 @@ def _render_opening_draws(turn: Turn) -> list[str]:
     return [f"Zugbeginn: {', '.join(turn.opening_draws)}", ""]
 
 
-def _render_turn(turn: Turn) -> list[str]:
+def _render_turn(turn: Turn, match_ended: MatchEnded | None) -> list[str]:
     return [
         f"## Zug {turn.number} – {turn.player_name}",
         "",
         *_render_opening_draws(turn),
         *_render_start_snapshot(turn.start),
         "",
-        *_render_actions(turn),
+        *_render_actions(turn, match_ended),
         "",
         *_render_end_snapshot(turn.end),
         "",
@@ -167,8 +201,10 @@ def render_match_summary(game: ParsedGame, when: datetime | None = None) -> str:
             f"- Zurückgelegt: {', '.join(returned_names)}",
             "",
         ]
-    for turn in game.turns:
-        lines += _render_turn(turn)
+    last_turn_index = len(game.turns) - 1
+    for i, turn in enumerate(game.turns):
+        turn_match_ended = game.match_ended if i == last_turn_index else None
+        lines += _render_turn(turn, turn_match_ended)
     if len(deck_names) >= _FULL_DECK_SIZE:
         lines += [
             "## Restdeck bei Spielende",

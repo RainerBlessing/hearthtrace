@@ -8,6 +8,7 @@ from hearthtrace.parser import (
     HandState,
     LifeState,
     ManaState,
+    MatchEnded,
     MinionState,
     MulliganChoice,
     ParsedGame,
@@ -423,6 +424,60 @@ def test_render_match_summary_includes_actions_with_indented_effects() -> None:
 
     assert "1. Du: Ritual of Power gespielt (Mana: 4 → 2)" in markdown
     assert "   → Breezling beschworen" in markdown
+
+
+def test_render_match_summary_shows_a_conceding_opponent_in_the_last_turn() -> None:
+    # User-reported real match: the recording just stopped mid-match with
+    # no indication why -- the opponent had actually conceded. The event
+    # must appear in the *last* turn only, continuing that turn's own
+    # action numbering, followed by a result summary line.
+    game = ParsedGame(
+        own_class="SHAMAN",
+        opponent_class="MAGE",
+        starting_deck=[],
+        result="WON",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[
+            _turn(number=1, player_name="Du"),
+            _turn(
+                number=2,
+                player_name="Gegner",
+                actions=[Action(headline="Gegner: Teerklumpen gespielt", effects=[])],
+            ),
+        ],
+        match_ended=MatchEnded(result="WON", reason="CONCEDE", actor="OPPONENT"),
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "2. Gegner gibt auf" in markdown
+    assert "Partie beendet – Sieg" in markdown
+    # The event belongs to the match's actual last turn only.
+    assert markdown.index("## Zug 2") < markdown.index("Gegner gibt auf")
+
+
+def test_render_match_summary_omits_the_reason_line_when_unknown() -> None:
+    # `MatchEnded.reason`/`actor` are deliberately conservative (see its
+    # own docstring) -- a plain lethal finish never sets a CONCEDED/
+    # DISCONNECTED tag, so reason stays "UNKNOWN" and actor stays None.
+    # Must not fabricate a specific cause; the generic summary is enough.
+    game = ParsedGame(
+        own_class="SHAMAN",
+        opponent_class="MAGE",
+        starting_deck=[],
+        result="LOST",
+        drawn_card_ids=[],
+        game_index=1,
+        turns=[_turn(number=1, player_name="Gegner")],
+        match_ended=MatchEnded(result="LOST", reason="UNKNOWN", actor=None),
+    )
+
+    markdown = render_match_summary(game)
+
+    assert "Partie beendet – Niederlage" in markdown
+    assert "gibt auf" not in markdown
+    assert "Verbindung" not in markdown
 
 
 def test_export_match_summary_writes_a_file(tmp_path: Path) -> None:

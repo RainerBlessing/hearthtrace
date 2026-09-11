@@ -265,6 +265,33 @@ class ParsedGame:
     # can recover it. Callers should surface this rather than presenting
     # a stale non-terminal `result` (e.g. "PLAYING") as if it were current.
     log_truncated: bool = False
+    # None while the match is still in progress (`result` not terminal).
+    # See `MatchEnded` for why `reason`/`actor` are deliberately
+    # conservative about what they claim to know.
+    match_ended: "MatchEnded | None" = None
+
+
+@dataclass
+class MatchEnded:
+    """How a finished match actually ended -- user-requested, so a concede
+    or disconnect shows up as a visible event in the last turn instead of
+    the recording just silently stopping mid-match.
+
+    `reason`/`actor` are set ONLY from a live-observed PLAYSTATE tag
+    change to CONCEDED/DISCONNECTED (see `_TurnBuilder.on_playstate_
+    changed`) -- verified against a real match that this transient value
+    gets overwritten to the final WON/LOST/TIED immediately after, so
+    re-deriving it from any player's *final* PLAYSTATE tag (the way
+    `result` itself already works) would never see it. A plain lethal
+    finish (normal combat/fatigue damage) never sets a CONCEDED/
+    DISCONNECTED tag at all -- Power.log gives no reliable way to tell
+    that apart from "we just don't know", so it's deliberately reported
+    as UNKNOWN/None rather than guessed at.
+    """
+
+    result: str  # "WON" | "LOST" | "TIED"
+    reason: str  # "CONCEDE" | "DISCONNECT" | "UNKNOWN"
+    actor: str | None  # "YOU" | "OPPONENT" | None
 
 
 def _class_name(player: Player, card_db: Any) -> str:
@@ -289,6 +316,17 @@ def _friendly_and_opponent(game: Game, friendly_id: int | None) -> tuple[Player,
 def _result_for(player: Player) -> str:
     playstate = player.tags.get(GameTag.PLAYSTATE, PlayState.INVALID)
     return PlayState(playstate).name if playstate else "UNKNOWN"
+
+
+def _match_ended_for(builder: "_TurnBuilder", result: str, me: Player) -> "MatchEnded | None":
+    if result not in ("WON", "LOST", "TIED", "CONCEDED"):
+        return None  # match still in progress (or truncated before an outcome)
+    match_result = "LOST" if result == "CONCEDED" else result
+    actor = None
+    if builder.match_end_player_id is not None:
+        actor = "YOU" if builder.match_end_player_id == me.id else "OPPONENT"
+    reason = builder.match_end_reason or "UNKNOWN"
+    return MatchEnded(result=match_result, reason=reason, actor=actor)
 
 
 def _player_label(player: Player | None, friendly_player: Player) -> str:
@@ -1087,6 +1125,26 @@ class _TurnBuilder:
         # `_AttackReadiness`.
         self._attacks_used_this_turn: dict[int, int] = {}
         self.turns: list[Turn] = []
+        # First-write-wins, same reasoning as `_frozen_hero_health`: a
+        # conceding/disconnecting player's PLAYSTATE briefly becomes
+        # CONCEDED/DISCONNECTED before Hearthstone immediately overwrites
+        # it with the final WON/LOST/TIED -- verified against a real
+        # match's raw log. Reading any player's *final* PLAYSTATE tag
+        # (the way `result` itself works) would never see this transient
+        # value, so it has to be captured live, the instant it happens.
+        self.match_end_reason: str | None = None
+        self.match_end_player_id: int | None = None
+
+    def on_playstate_changed(self, entity_id: int, value: int) -> None:
+        if self.match_end_reason is not None:
+            return
+        if value == PlayState.CONCEDED:
+            self.match_end_reason = "CONCEDE"
+        elif value == PlayState.DISCONNECTED:
+            self.match_end_reason = "DISCONNECT"
+        else:
+            return
+        self.match_end_player_id = entity_id
 
     def on_entity_entered_play(self, entity_id: int) -> None:
         if self._current is None or entity_id in self._entered_play_turn:
@@ -1375,6 +1433,8 @@ class _SnapshotEntityTreeExporter(EntityTreeExporter):
                 self._builder.on_turn_number(packet.value, self.game)
             elif packet.tag == GameTag.STEP and packet.value == Step.MAIN_ACTION:
                 self._builder.on_turn_ready(self.game)
+        elif isinstance(entity, Player) and packet.tag == GameTag.PLAYSTATE:
+            self._builder.on_playstate_changed(entity.id, packet.value)
         return entity
 
     def handle_block(self, packet: Any) -> None:
@@ -1738,16 +1798,18 @@ def _parse_lines(lines: list[str], game_index: int, source: str) -> ParsedGame:
     _insert_opening_draws(builder.turns)
     _insert_discover_actions(builder.turns, _extract_discoveries(packet_tree, game, card_db, me))
 
+    result = _result_for(me)
     return ParsedGame(
         own_class=_class_name(me, card_db),
         opponent_class=_class_name(opponent, card_db),
         starting_deck=me.known_starting_deck_list,
-        result=_result_for(me),
+        result=result,
         drawn_card_ids=not_in_deck,
         game_index=game_index,
         mulligan=mulligan,
         turns=builder.turns,
         log_truncated=log_truncated,
+        match_ended=_match_ended_for(builder, result, me),
     )
 
 

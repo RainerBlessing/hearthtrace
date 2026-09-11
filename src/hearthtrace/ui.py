@@ -25,6 +25,7 @@ from hearthtrace.match_history import (  # noqa: E402
 )
 from hearthtrace.parser import (  # noqa: E402
     HandCard,
+    MatchEnded,
     MinionState,
     NoGameFoundError,
     ParsedGame,
@@ -121,6 +122,20 @@ _RESULT_DOT_CSS_CLASS = {
     "WON": "success",
     "LOST": "error",
     "CONCEDED": "error",  # the friendly player's own PLAYSTATE -- a loss
+}
+
+# Past tense for the Replay conclusion block ("Gegner hat aufgegeben"),
+# distinct from markdown_export's own present-tense action-headline
+# wording ("Gegner gibt auf") -- this isn't rendered as a numbered action
+# here, it's a standalone summary sentence. Missing (reason, actor)
+# combinations (reason == "UNKNOWN", or actor is None -- see MatchEnded's
+# own docstring for why those happen) deliberately have no entry; the
+# block still shows, just without a specific cause.
+_MATCH_END_REASON_TEXT: dict[tuple[str, str | None], str] = {
+    ("CONCEDE", "YOU"): "Du hast aufgegeben",
+    ("CONCEDE", "OPPONENT"): "Gegner hat aufgegeben",
+    ("DISCONNECT", "YOU"): "Du hast die Verbindung verloren",
+    ("DISCONNECT", "OPPONENT"): "Gegner hat die Verbindung verloren",
 }
 
 # Adw.ToggleGroup's own vertical padding (confirmed via its real CSS node,
@@ -696,7 +711,6 @@ class TrackerWindow(Adw.ApplicationWindow):
             placeholder = Gtk.Label(label="(keine Aktionen diesen Zug)", xalign=0)
             placeholder.add_css_class("dim-label")
             box.append(placeholder)
-            return
         for index, action in enumerate(turn.actions, start=1):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             row.set_valign(Gtk.Align.START)
@@ -764,6 +778,48 @@ class TrackerWindow(Adw.ApplicationWindow):
             row.append(badge_column)
             row.append(content)
             box.append(row)
+
+        game = self._replay_game
+        if (
+            game is not None
+            and game.match_ended is not None
+            and game.turns
+            and turn is game.turns[-1]
+        ):
+            box.append(self._build_match_ended_block(game.match_ended))
+
+    @staticmethod
+    def _build_match_ended_block(match_ended: MatchEnded) -> Gtk.Box:
+        # Deliberately not another numbered/badged row like the actions
+        # above -- a concede/disconnect is a match-end event, not a
+        # Hearthstone turn action ("played a card", "attacked"), so it
+        # gets its own visually separate block instead.
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.add_css_class("card")
+        box.set_margin_top(12)
+
+        icon = Gtk.Label(label="✓")
+        icon.add_css_class(_RESULT_DOT_CSS_CLASS.get(match_ended.result, "dim-label"))
+        icon.set_margin_start(12)
+        box.append(icon)
+
+        text_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        text_column.set_margin_top(8)
+        text_column.set_margin_bottom(8)
+        text_column.set_margin_end(12)
+        title = Gtk.Label(label="Partie beendet", xalign=0)
+        title.add_css_class("heading")
+        text_column.append(title)
+
+        result_label = RESULT_LABELS.get(match_ended.result, match_ended.result)
+        reason_text = _MATCH_END_REASON_TEXT.get((match_ended.reason, match_ended.actor))
+        subtitle_text = f"{reason_text} · {result_label}" if reason_text else result_label
+        subtitle = Gtk.Label(label=subtitle_text, xalign=0)
+        subtitle.add_css_class("dim-label")
+        text_column.append(subtitle)
+
+        box.append(text_column)
+        return box
 
     @staticmethod
     def _build_unused_attack_hint(minions: list[MinionState]) -> Gtk.Label | None:

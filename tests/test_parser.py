@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from hearthstone.cardxml import load as load_cards
 from hearthstone.entities import Card, Game, Player
-from hearthstone.enums import CardType, ChoiceType, GameTag, Zone
+from hearthstone.enums import CardType, ChoiceType, GameTag, PlayState, Zone
 from hslog import packets as hslog_packets
 
 from hearthtrace.parser import (
@@ -13,6 +13,7 @@ from hearthtrace.parser import (
     HandState,
     LifeState,
     ManaState,
+    MatchEnded,
     NoGameFoundError,
     Turn,
     TurnSnapshot,
@@ -123,6 +124,15 @@ APOSTROPHE_SUBSPELL_FIXTURE = (
 UNUSED_ATTACK_REVIEW_HINT_FIXTURE = (
     Path(__file__).parent / "fixtures" / "unused_attack_review_hint_match.power.log"
 )
+# A real match, user-reported: won on turn 12 after the opponent conceded
+# right after playing Teerklumpen (Tar Lump) -- the export/Replay gave no
+# indication *why* the recording ended there, reading as if it had simply
+# been cut off mid-match. Verified directly against the raw log: the
+# opponent's own PLAYSTATE briefly becomes CONCEDED, then Hearthstone
+# immediately overwrites it with the final LOST -- confirms `MatchEnded`
+# must be captured live from that transient tag change, not re-derived
+# from anyone's final PLAYSTATE.
+OPPONENT_CONCEDE_FIXTURE = Path(__file__).parent / "fixtures" / "opponent_concede_match.power.log"
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -714,6 +724,32 @@ def test_minion_state_reports_zero_attacks_remaining_once_windfury_is_fully_used
     al_akir = next(m for m in turn.end.board.own if "Herr der Stürme" in m.name)
     assert al_akir.attacks_remaining == 0
     assert "kann angreifen" not in al_akir.keywords
+
+
+def test_parse_log_reports_a_conceding_opponent_from_the_live_playstate_change() -> None:
+    game = parse_log(OPPONENT_CONCEDE_FIXTURE)
+    assert game.result == "WON"
+    assert game.match_ended == MatchEnded(result="WON", reason="CONCEDE", actor="OPPONENT")
+
+
+def test_parse_log_reports_no_match_ended_while_a_match_is_still_in_progress() -> None:
+    # Same fixture family as the Windfury regression tests: a real match
+    # deliberately truncated mid-turn, result == "PLAYING". MatchEnded must
+    # stay None -- there is no ending to describe yet.
+    game = parse_log(APOSTROPHE_SUBSPELL_FIXTURE)
+    assert game.result == "PLAYING"
+    assert game.match_ended is None
+
+
+def test_turn_builder_on_playstate_changed_is_first_write_wins() -> None:
+    # Verified against the real fixture above: the conceding player's own
+    # PLAYSTATE goes CONCEDED, then Hearthstone immediately overwrites it
+    # with LOST -- that second change must not clobber the first.
+    builder = _TurnBuilder(friendly_id=1, card_db={})
+    builder.on_playstate_changed(entity_id=7, value=PlayState.CONCEDED)
+    builder.on_playstate_changed(entity_id=7, value=PlayState.LOST)
+    assert builder.match_end_reason == "CONCEDE"
+    assert builder.match_end_player_id == 7
 
 
 def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:
