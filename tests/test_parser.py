@@ -111,6 +111,18 @@ WINDFURY_ATTACKS_REMAINING_FIXTURE = (
 APOSTROPHE_SUBSPELL_FIXTURE = (
     Path(__file__).parent / "fixtures" / "apostrophe_subspell_match.power.log"
 )
+# A real match, user-requested as "a near-perfect test case" for a general
+# attacks_remaining review hint (not one tailored to Al'Akir/Windfury
+# specifically): turn 18's Al'Akir, Lord of Storms correctly uses both of
+# its Windfury attacks (attacks_remaining == 0 by turn end); turn 30's
+# The One-Amalgam Band (also Windfury, from a random battlecry bonus, not
+# its printed card text) is played and never attacks at all, leaving both of
+# its attacks unused (attacks_remaining == 2) -- confirms the same
+# tracking is correct for a second, unrelated Windfury source, not just
+# the one card the original fix was written against.
+UNUSED_ATTACK_REVIEW_HINT_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "unused_attack_review_hint_match.power.log"
+)
 
 
 def _make_game_with_players() -> tuple[Game, Player, Player]:
@@ -678,6 +690,30 @@ def test_parse_log_does_not_grant_a_phantom_attack_after_windfury_is_silenced() 
 def test_parse_log_survives_a_malformed_subspell_packet_from_an_apostrophe_in_a_card_id() -> None:
     game = parse_log(APOSTROPHE_SUBSPELL_FIXTURE)
     assert len(game.turns) > 0
+
+
+def test_minion_state_exposes_attacks_remaining_as_a_count_not_just_a_keyword() -> None:
+    # User-reported real match, turn 30: The One-Amalgam Band ends the turn
+    # with both of its (battlecry-granted) Windfury attacks unused. A plain
+    # "kann angreifen" keyword can't tell that apart from "one of two used"
+    # -- the whole point of exposing the actual count.
+    game = parse_log(UNUSED_ATTACK_REVIEW_HINT_FIXTURE)
+    turn = next(t for t in game.turns if t.number == 30)
+    orchestra = next(m for m in turn.end.board.own if "Orchester" in m.name)
+    assert orchestra.attacks_remaining == 2
+    assert "kann angreifen" in orchestra.keywords
+
+
+def test_minion_state_reports_zero_attacks_remaining_once_windfury_is_fully_used() -> None:
+    # Same match, turn 18: Al'Akir, Lord of Storms correctly uses both of
+    # its own Windfury attacks -- attacks_remaining must be 0, not just
+    # "kann angreifen" absent, confirming the fix from the earlier
+    # regression still holds via the new field, not just the keyword.
+    game = parse_log(UNUSED_ATTACK_REVIEW_HINT_FIXTURE)
+    turn = next(t for t in game.turns if t.number == 18)
+    al_akir = next(m for m in turn.end.board.own if "Herr der Stürme" in m.name)
+    assert al_akir.attacks_remaining == 0
+    assert "kann angreifen" not in al_akir.keywords
 
 
 def test_parse_log_captures_an_attack_nested_inside_an_untracked_trigger() -> None:

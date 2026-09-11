@@ -635,6 +635,17 @@ class TrackerWindow(Adw.ApplicationWindow):
         own_header.set_margin_top(8)
         box.append(own_header)
         box.append(self._build_board_flowbox(snapshot.board.own))
+        if snapshot is turn.end:
+            # User-requested review hint, generalized around
+            # `MinionState.attacks_remaining` (not tailored to Windfury/
+            # Al'Akir specifically -- verified against a real match that
+            # any minion, not just a Windfury one, can end a turn with an
+            # attack left unused). Only shown on the Ende stage: at Start
+            # or during Aktionen, "still has an attack" doesn't mean
+            # anything yet -- the turn isn't over.
+            unused_attack_hint = self._build_unused_attack_hint(snapshot.board.own)
+            if unused_attack_hint is not None:
+                box.append(unused_attack_hint)
 
         hand_caption = Gtk.Label(label="Hand", xalign=0)
         hand_caption.add_css_class("caption")
@@ -753,6 +764,22 @@ class TrackerWindow(Adw.ApplicationWindow):
             row.append(badge_column)
             row.append(content)
             box.append(row)
+
+    @staticmethod
+    def _build_unused_attack_hint(minions: list[MinionState]) -> Gtk.Label | None:
+        unused = [m for m in minions if m.attacks_remaining > 0]
+        if not unused:
+            return None
+        parts = [
+            m.name if m.attacks_remaining == 1 else f"{m.name} ({m.attacks_remaining})"
+            for m in unused
+        ]
+        hint = Gtk.Label(label=f"⚠ Ungenutzte Angriffe: {', '.join(parts)}", xalign=0)
+        hint.add_css_class("caption")
+        hint.add_css_class("warning")
+        hint.set_wrap(True)
+        hint.set_margin_top(4)
+        return hint
 
     def _build_board_flowbox(self, minions: list[MinionState]) -> Gtk.FlowBox:
         flow = Gtk.FlowBox()

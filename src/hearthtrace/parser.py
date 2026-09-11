@@ -118,6 +118,16 @@ class MinionState:
     # Karte" aren't reliable lookup keys). Empty for an unrevealed entity
     # (see `_card_name`).
     card_id: str
+    # How many attacks this minion has left *this turn* -- 0, 1, or 2 with
+    # Windfury. "kann angreifen" in `keywords` is just `attacks_remaining >
+    # 0`; this is the actual count a caller needs to tell "used one of two
+    # Windfury attacks" apart from "used none of two", which a boolean
+    # can't (both look identical as a plain keyword). User-requested,
+    # generalized from a review hint that was originally going to be
+    # Al'Akir/Windfury-specific: verified against a real match that any
+    # minion can end a turn with an unused attack, not just a Windfury
+    # one, so the hint (and this field) must not special-case Windfury.
+    attacks_remaining: int = 0
 
 
 @dataclass
@@ -424,18 +434,25 @@ class _AttackReadiness:
     attacks_used_this_turn: dict[int, int]
 
 
-def _minion_keywords(entity: Entity, readiness: _AttackReadiness) -> list[str]:
-    keywords = [label for tag, label in _KEYWORD_TAGS if entity.tags.get(tag, 0)]
+def _attacks_remaining(entity: Entity, readiness: _AttackReadiness) -> int:
     attack = entity.tags.get(GameTag.ATK, 0)
     frozen = entity.tags.get(GameTag.FROZEN, 0)
+    if attack <= 0 or frozen:
+        return 0
     has_charge_or_rush = entity.tags.get(GameTag.CHARGE, 0) or entity.tags.get(GameTag.RUSH, 0)
     summoning_sick = (
         readiness.entered_play_turn.get(entity.id) == readiness.turn_number
         and not has_charge_or_rush
     )
+    if summoning_sick:
+        return 0
     allowed_attacks = 2 if entity.tags.get(GameTag.WINDFURY, 0) else 1
-    attacks_remaining = allowed_attacks - readiness.attacks_used_this_turn.get(entity.id, 0)
-    if attack > 0 and not frozen and not summoning_sick and attacks_remaining > 0:
+    return max(0, allowed_attacks - readiness.attacks_used_this_turn.get(entity.id, 0))
+
+
+def _minion_keywords(entity: Entity, readiness: _AttackReadiness) -> list[str]:
+    keywords = [label for tag, label in _KEYWORD_TAGS if entity.tags.get(tag, 0)]
+    if _attacks_remaining(entity, readiness) > 0:
         keywords.append("kann angreifen")
     return keywords
 
@@ -450,6 +467,7 @@ def _minion_state(
         health=health,
         keywords=_minion_keywords(entity, readiness),
         card_id=entity.card_id or "",
+        attacks_remaining=_attacks_remaining(entity, readiness),
     )
 
 
