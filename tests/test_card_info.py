@@ -112,6 +112,28 @@ def test_select_text_variant_clamps_an_out_of_range_value() -> None:
     assert _select_text_variant(variants, script_data_num_1=99) == "drei"
 
 
+def test_select_text_variant_falls_back_when_splitting_breaks_markup() -> None:
+    # Found live (a real Pango markup parse error): The One-Amalgam Band's
+    # own description uses "@" *both* as a variant separator and, within
+    # one of those variants, as an unrelated numeric placeholder
+    # ("<i>(@)</i>") -- splitting blindly on every "@" cuts that variant's
+    # own <i> tag in half ("<i>(" / ")</i>"), producing invalid markup.
+    # Verified against the real card database (ETC_409).
+    description = (
+        "<b>Kampfschrei:</b> Erhält einen zufälligen Bonuseffekt für jeden Diener eines"
+        " anderen Typs, den Ihr in diesem Spiel ausgespielt habt.@ <i>(@)</i>"
+    )
+    assert _select_text_variant(description, script_data_num_1=6) == description
+
+
+def test_select_text_variant_still_splits_when_every_variant_is_well_formed() -> None:
+    # The balanced-markup fallback must not swallow the normal case --
+    # confirmed with real, correctly-splittable card text elsewhere in
+    # this file (Soldat von Al'Akir).
+    variants = "eins <b>zwei</b>@drei <i>vier</i>@fünf"
+    assert _select_text_variant(variants, script_data_num_1=2) == "drei <i>vier</i>"
+
+
 def test_card_info_falls_back_for_an_empty_card_id() -> None:
     # No card_id at all happens for a not-yet-revealed entity -- must
     # degrade gracefully, not raise, so a tooltip can still be attempted

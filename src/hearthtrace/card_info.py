@@ -215,7 +215,35 @@ def _select_text_variant(description: str, script_data_num_1: int) -> str:
         return description
     variants = description.split("@")
     index = max(0, min(len(variants) - 1, script_data_num_1 - 1))
-    return variants[index].replace("{0}", str(script_data_num_1))
+    selected = variants[index].replace("{0}", str(script_data_num_1))
+    if not _has_balanced_markup(selected):
+        # Found live (a real Pango markup parse error, verified against
+        # the actual card database): "@" is overloaded in Hearthstone's
+        # own card-text templating -- The One-Amalgam Band uses it *both*
+        # as a variant separator *and*, within one of those variants' own
+        # text, as an unrelated numeric placeholder ("<i>(@)</i>").
+        # Splitting blindly on every "@" then cuts that variant's own
+        # <i>/<b> tags in half. A full fix needs Hearthstone's own
+        # per-card text-builder semantics (deliberately out of scope here,
+        # tracked separately -- see this function's own docstring); until
+        # then, the untouched raw description is a safer fallback than
+        # truncated, mismatched markup, even though it re-introduces the
+        # "shows every variant at once" issue for this specific card.
+        return description
+    return selected
+
+
+def _has_balanced_markup(text: str) -> bool:
+    stack: list[str] = []
+    for match in re.finditer(r"</?([a-zA-Z]+)>", text):
+        tag = match.group(1)
+        if match.group(0).startswith("</"):
+            if not stack or stack[-1] != tag:
+                return False
+            stack.pop()
+        else:
+            stack.append(tag)
+    return not stack
 
 
 _STATS_CARD_TYPES = (CardType.MINION, CardType.WEAPON, CardType.LOCATION)
