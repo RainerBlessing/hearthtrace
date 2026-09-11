@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from hearthstone.enums import CardType, Rarity
+from hearthstone.enums import CardType, Race, Rarity
 
 from hearthtrace.parser import KEYWORD_LABELS
 
@@ -22,6 +22,25 @@ _TYPE_LABELS: dict[CardType, str] = {
     CardType.HERO: "Held",
     CardType.HERO_POWER: "Heldenkraft",
     CardType.LOCATION: "Ort",
+}
+
+# Only the tribes that actually show up on a normal hand/board minion --
+# deliberately not exhaustive (the enum also has adventure-only/removed
+# values like the individual old-WoW humanoid races, BLANK, ALL) since
+# those never appear on a real drafted card this tooltip would be shown
+# for.
+_RACE_LABELS: dict[Race, str] = {
+    Race.BEAST: "Bestie",
+    Race.DEMON: "Dämon",
+    Race.DRAGON: "Drache",
+    Race.ELEMENTAL: "Elementar",
+    Race.MECHANICAL: "Mechanisch",
+    Race.MURLOC: "Murloc",
+    Race.NAGA: "Naga",
+    Race.PIRATE: "Pirat",
+    Race.QUILBOAR: "Quilboar",
+    Race.TOTEM: "Totem",
+    Race.UNDEAD: "Untot",
 }
 
 _RARITY_LABELS: dict[Rarity, str] = {
@@ -74,8 +93,48 @@ class CardInfo:
     attack: int | None
     health: int | None  # a weapon's durability lives here too, see below
     rarity_label: str | None
+    race_label: str | None
     keywords: list[str]
     text: str
+
+
+# User-reported (real screenshots): both a leading "[x]" and a literal
+# unresolved "{0}" showed up verbatim in the tooltip -- these are
+# Blizzard's own raw templating artifacts, never meant to reach a player,
+# that this locale's export doesn't always fully resolve on its own.
+#
+# "[x]" is a bare formatting marker with no discernible meaning of its own
+# (verified: stripping it never changes what the sentence says) -- always
+# removed outright, wherever it appears.
+_INTERNAL_MARKER_RE = re.compile(r"\[x\]")
+
+# "Kündigt {0} an." ("Herald {0}.") -- the printed text names a specific
+# card chosen per-copy at collection time (Cataclysm's "Herald" cards),
+# which needs the live *entity's* tags to resolve, not just its card_id
+# (see `card_info`'s own docstring for why this function only ever gets a
+# card_id). Rather than showing the raw placeholder, falls back to the
+# generic phrasing the user explicitly signed off on.
+_HERALD_PLACEHOLDER_RE = re.compile(r"\{[0-9]+\}(\s*an\b)")
+
+# "Ruft ... ({0}) herbei." / "({0}/{1})" -- a parenthetical stating the
+# summoned token's stats, also only known from live entity data. Dropped
+# entirely rather than guessed at; the sentence still reads fine without
+# it ("Ruft einen Welpling herbei." instead of "Ruft einen Welpling (2/1)
+# herbei.").
+_UNRESOLVED_STATS_PAREN_RE = re.compile(r"\s*\([^()]*\{[0-9]+\}[^()]*\)")
+
+# Blizzard's own count-agreement (singular/plural) selector syntax, e.g.
+# "|4(Kopie,Kopien)" -- which of the two forms is grammatically correct
+# depends on a live count we don't have. Falls back to the first
+# (singular) alternative, always at least grammatically plausible.
+_PLURAL_SELECTOR_RE = re.compile(r"\|[0-9]+\(([^,()]+),[^()]*\)")
+
+# Catch-all for any other/unanticipated "{N}" placeholder this locale's
+# export left unresolved -- per explicit user instruction, a placeholder
+# must never be visible in the UI, even if the specific card/pattern
+# wasn't seen before. Applied last, after the more specific substitutions
+# above already handled the known patterns with better wording.
+_UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{[0-9]+\}")
 
 
 def sanitize_description(description: str | None) -> str:
@@ -91,12 +150,44 @@ def sanitize_description(description: str | None) -> str:
       markup parsing is case-sensitive and would reject it outright.
     - a literal, unescaped "&" (two enchantment cards) -- would otherwise
       make Pango's XML-ish parser choke.
+    - internal template markers ("[x]", "{0}", "|4(a,b)") that depend on
+      per-entity live data this function doesn't have -- see the regexes
+      above for what each one does and why.
     """
     if not description:
         return ""
     text = description.replace("_", " ")
     text = text.replace("</I>", "</i>")
     text = re.sub(r"&(?!amp;|lt;|gt;|quot;|apos;|#)", "&amp;", text)
+    text = _INTERNAL_MARKER_RE.sub("", text)
+    text = _HERALD_PLACEHOLDER_RE.sub(r"einen Diener\1", text)
+    text = _UNRESOLVED_STATS_PAREN_RE.sub("", text)
+    text = _PLURAL_SELECTOR_RE.sub(r"\1", text)
+    text = _UNRESOLVED_PLACEHOLDER_RE.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def _strip_leading_keyword_prefix(text: str, keywords: list[str]) -> str:
+    """Drops a keyword's own bold-labeled mention from the *start* of the
+    body text when that keyword is already shown separately (see
+    `CardInfo.keywords`) -- e.g. "<b>Spott</b>. Kampfschrei: ..." becomes
+    just "Kampfschrei: ..." once "Spott" is its own line above, instead of
+    repeating it. Only ever strips an exact match at the current start of
+    the text (never mid-sentence), and only for labels this exact card
+    actually has (`keywords`, not the full `_KEYWORD_ATTRS` list) -- a
+    keyword mentioned in a dependent clause elsewhere in the text is left
+    untouched.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for label in keywords:
+            pattern = rf"^\s*<b>{re.escape(label)}</b>\.?\s*"
+            new_text = re.sub(pattern, "", text, count=1)
+            if new_text != text:
+                text = new_text
+                changed = True
     return text
 
 
@@ -127,6 +218,7 @@ def card_info(card_id: str, card_db: Any) -> CardInfo:
             attack=None,
             health=None,
             rarity_label=None,
+            race_label=None,
             keywords=[],
             text="",
         )
@@ -139,6 +231,7 @@ def card_info(card_id: str, card_db: Any) -> CardInfo:
             attack=None,
             health=None,
             rarity_label=None,
+            race_label=None,
             keywords=[],
             text="",
         )
@@ -150,6 +243,8 @@ def card_info(card_id: str, card_db: Any) -> CardInfo:
     # attack value at all, unlike weapons/minions.
     health = card.health if card.type in _STATS_CARD_TYPES else None
     attack = card.atk if card.type in (CardType.MINION, CardType.WEAPON) else None
+    keywords = _keywords_of(card)
+    text = _strip_leading_keyword_prefix(sanitize_description(card.description), keywords)
 
     return CardInfo(
         name=card.name,
@@ -158,6 +253,7 @@ def card_info(card_id: str, card_db: Any) -> CardInfo:
         attack=attack,
         health=health,
         rarity_label=_RARITY_LABELS.get(card.rarity),
-        keywords=_keywords_of(card),
-        text=sanitize_description(card.description),
+        race_label=_RACE_LABELS.get(card.race),
+        keywords=keywords,
+        text=text,
     )

@@ -16,6 +16,7 @@ def test_card_info_reads_a_real_minion() -> None:
         attack=3,
         health=4,
         rarity_label="Legendär",
+        race_label=None,
         keywords=[],
         text="Eure Deckgröße\nund Euer anfängliches Leben betragen 40.",
     )
@@ -40,6 +41,39 @@ def test_card_info_reads_printed_keywords_and_bold_markup() -> None:
     assert info.name == "Himmelswallwächter"
     assert info.keywords == ["Spott"]
     assert "<b>Kampfschrei:</b>" in info.text
+
+
+def test_card_info_reads_the_printed_minion_race() -> None:
+    info = card_info("CORE_WC_042", _CARD_DB)  # Whimpering Wretch (Elemental)
+
+    assert info.race_label == "Elementar"
+
+
+def test_card_info_strips_the_internal_x_marker_from_a_real_card() -> None:
+    # User-reported (real screenshot): "[x]Erhält jedes Mal +1 Angriff..."
+    # showed the raw "[x]" prefix verbatim in the tooltip.
+    info = card_info("CORE_WC_042", _CARD_DB)
+
+    assert info.text == (
+        "Erhält jedes Mal +1 Angriff,\nnachdem Ihr einen Elementar\nausgespielt habt."
+    )
+
+
+def test_card_info_resolves_an_unresolved_herald_placeholder_and_drops_the_leading_keyword() -> (
+    None
+):
+    # User-reported (real screenshot): "Spott. Kampfschrei: Kündigt {0} an."
+    # showed the raw "{0}" -- the actual card named here is chosen per-copy
+    # at collection time (a live-entity fact `card_info` has no access to,
+    # see its own docstring), so it falls back to the generic wording the
+    # user explicitly signed off on. "Spott" is also dropped from the body
+    # since it's already shown separately via `keywords`.
+    info = card_info("CATA_722", _CARD_DB)  # Envoy of the End
+
+    assert info.keywords == ["Spott"]
+    assert info.text == "<b>Kampfschrei:</b> <b>Kündigt</b> einen Diener an."
+    assert "{0}" not in info.text
+    assert "Spott" not in info.text
 
 
 def test_card_info_falls_back_for_an_empty_card_id() -> None:
@@ -112,3 +146,33 @@ def test_sanitize_description_leaves_already_valid_markup_and_entities_alone() -
 def test_sanitize_description_handles_empty_text() -> None:
     assert sanitize_description("") == ""
     assert sanitize_description(None) == ""
+
+
+def test_sanitize_description_strips_the_internal_x_marker() -> None:
+    assert sanitize_description("[x]Text ohne Marker") == "Text ohne Marker"
+
+
+def test_sanitize_description_resolves_a_herald_placeholder_generically() -> None:
+    assert sanitize_description("<b>Kündigt</b> {0} an.") == "<b>Kündigt</b> einen Diener an."
+
+
+def test_sanitize_description_drops_a_parenthetical_with_an_unresolved_stat_placeholder() -> None:
+    # Verified against the real card database (Twilight Egg): the stats in
+    # "Ruft einen Welpling ({0}/{1}) herbei." are only known from a live
+    # entity's tags, not the static card_id -- dropped rather than shown
+    # as a raw placeholder.
+    assert (
+        sanitize_description("Ruft einen Welpling ({0}/{1}) herbei.")
+        == "Ruft einen Welpling herbei."
+    )
+
+
+def test_sanitize_description_resolves_a_plural_selector_to_its_singular_form() -> None:
+    assert sanitize_description("Mischt |4(Kopie,Kopien) davon ein.") == "Mischt Kopie davon ein."
+
+
+def test_sanitize_description_strips_any_other_unresolved_placeholder() -> None:
+    # Safety net for a pattern not specifically handled above -- per
+    # explicit user instruction, a "{N}" placeholder must never be
+    # visible in the UI, even in a case not seen before.
+    assert sanitize_description("Ein {2} Test.") == "Ein Test."

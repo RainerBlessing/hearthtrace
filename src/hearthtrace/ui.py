@@ -163,25 +163,43 @@ def _card_tooltip_markup(info: CardInfo) -> str:
     # other field here is plain text and must be escaped, or a card name
     # or keyword that happens to contain "&"/"<" would break the whole
     # tooltip instead of just that one field.
-    lines = [f"<b>{escape(info.name)}</b>"]
-    stats = []
+    #
+    # Deliberately laid out as four visually distinct lines (title / meta
+    # / stats / keywords) instead of one running line of comma-separated
+    # facts -- user feedback on a real screenshot found the previous
+    # single-line layout too "raw"/unstructured to scan at a glance.
+    header = [f'<span size="large" weight="bold">{escape(info.name)}</span>']
+
+    meta = []
     if info.cost is not None:
-        stats.append(f"{info.cost} Mana")
+        meta.append(f"{info.cost} Mana")
+    if info.type_label:
+        meta.append(info.type_label)
+    if info.rarity_label:
+        meta.append(info.rarity_label)
+    if meta:
+        header.append(escape(" · ".join(meta)))
+
+    # Spells have neither -- an empty stats line would just be a blank
+    # row between the meta line and the keywords/text, exactly the
+    # "empty stat block" the user asked to avoid for non-minions.
+    stats = []
     if info.attack is not None and info.health is not None:
         stats.append(f"{info.attack}/{info.health}")
-    elif info.health is not None:  # a Location's durability -- no attack value
+    elif info.health is not None:  # a weapon's durability/Location -- no attack
         stats.append(str(info.health))
-    if info.type_label:
-        stats.append(info.type_label)
-    if info.rarity_label:
-        stats.append(info.rarity_label)
+    if info.race_label:
+        stats.append(info.race_label)
     if stats:
-        lines.append(escape("   ".join(stats)))
+        header.append(escape(" · ".join(stats)))
+
     if info.keywords:
-        lines.append(escape(", ".join(info.keywords)))
+        header.append(f'<b>{escape(", ".join(info.keywords))}</b>')
+
+    lines = ["\n".join(header)]
     if info.text:
         lines.append(info.text)
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 class TrackerWindow(Adw.ApplicationWindow):
@@ -823,17 +841,19 @@ class TrackerWindow(Adw.ApplicationWindow):
 
     @staticmethod
     def _build_unused_attack_hint(minions: list[MinionState]) -> Gtk.Label | None:
-        unused = [m for m in minions if m.attacks_remaining > 0]
-        if not unused:
+        # User feedback on a real screenshot: naming every minion inline
+        # ran off the edge of the page with a wide board. For a review
+        # hint, the count alone is enough to notice "something was left
+        # on the table" while scanning turns -- the board itself (already
+        # visible right above this) shows exactly which minion once you
+        # go looking. Counts *attacks*, not minions, so a Windfury minion
+        # with both attacks unused contributes 2, not 1.
+        total = sum(m.attacks_remaining for m in minions)
+        if total == 0:
             return None
-        parts = [
-            m.name if m.attacks_remaining == 1 else f"{m.name} ({m.attacks_remaining})"
-            for m in unused
-        ]
-        hint = Gtk.Label(label=f"⚠ Ungenutzte Angriffe: {', '.join(parts)}", xalign=0)
+        hint = Gtk.Label(label=f"⚠ Ungenutzte Angriffe: {total}", xalign=0)
         hint.add_css_class("caption")
         hint.add_css_class("warning")
-        hint.set_wrap(True)
         hint.set_margin_top(4)
         return hint
 
@@ -943,8 +963,12 @@ class TrackerWindow(Adw.ApplicationWindow):
             self._card_tooltip_markup_cache[card_id] = markup
         widget.set_tooltip_markup(markup)
 
-        label = Gtk.Label(label=markup, use_markup=True, wrap=True)
-        label.set_max_width_chars(40)
+        label = Gtk.Label(label=markup, use_markup=True, wrap=True, xalign=0)
+        # Narrower than before (40) -- user feedback: "eher schmaler und
+        # höher als breit und gedrungen" now that the header is its own
+        # multi-line block rather than one long comma-joined line, a
+        # narrower width no longer forces awkward mid-fact wrapping.
+        label.set_max_width_chars(30)
         for setter in (
             label.set_margin_top,
             label.set_margin_bottom,
