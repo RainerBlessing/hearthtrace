@@ -192,14 +192,38 @@ class TurnSnapshot:
 
 
 @dataclass
+class HeroAttackDetail:
+    """Structured detail for an attack against the enemy hero -- the same
+    facts `_attack_headline` already folds into its returned headline
+    string (see `Action.hero_attack`), just not as plain text. Never set
+    for a minion-vs-minion attack: `_diff_effects` already puts both
+    minions' stat changes in `Action.effects` for that case, nothing extra
+    needed."""
+
+    attacker_name: str
+    defender_name: str
+    damage: int
+    health_before: int
+    health_after: int
+
+
+@dataclass
 class Action:
     # Pre-rendered, ready-to-print text: the single headline for this
     # action, and zero or more indented result lines below it (summons,
     # damage/heal, deaths). Kept as plain strings rather than further
-    # structured data since Markdown rendering is this data's only
-    # consumer.
+    # structured data since Markdown rendering is this data's main
+    # consumer, and free-form natural-language text is exactly what a
+    # Markdown export wants.
     headline: str
     effects: list[str] = field(default_factory=list)
+    # Purely additive, and only ever set alongside a `headline` that
+    # already says the same thing in prose (a hero-target attack's
+    # "(N Angriff) → Ziel: X → Y" wording) -- the compact Replay UI reads
+    # this instead of parsing that sentence back apart, to render the
+    # attack and its damage as two visually distinct lines rather than one
+    # long one. Markdown export ignores it entirely.
+    hero_attack: HeroAttackDetail | None = None
 
 
 @dataclass
@@ -987,34 +1011,43 @@ def _attack_headline(
     before: _EntitySnapshot,
     after: _EntitySnapshot,
     interrupted: bool,
-) -> tuple[str, frozenset[int]]:
+) -> tuple[str, frozenset[int], HeroAttackDetail | None]:
     """Returns (headline, entity ids already folded into the headline --
-    excluded from the generic effect-line diff to avoid duplicating them).
-    `interrupted` (the attacker never actually reached the board again,
-    e.g. bounced by a triggered Secret) suppresses the hero-target life
-    fold, since no damage was actually dealt to fold in."""
+    excluded from the generic effect-line diff to avoid duplicating them,
+    structured hero-attack detail for the compact Replay UI -- see
+    `HeroAttackDetail`). `interrupted` (the attacker never actually
+    reached the board again, e.g. bounced by a triggered Secret) suppresses
+    the hero-target life fold, since no damage was actually dealt to fold
+    in."""
     attacker = game.find_entity_by_id(block.entity)
     defender = _resolve_attack_defender(block, game, before, after)
     player_label = _player_label(attacker.controller if attacker else None, friendly_player)
     if attacker is None or defender is None:
-        return f"{player_label}: Angriff", frozenset()
+        return f"{player_label}: Angriff", frozenset(), None
 
     attacker_name = namer.display_name(attacker, friendly_player)
     defender_name = namer.display_name(defender, friendly_player)
     attacker_attack = before.get(block.entity, _NOT_TRACKED)[1]
 
     if defender.type != CardType.HERO:
-        return f"{player_label}: {attacker_name} → {defender_name}", frozenset()
+        return f"{player_label}: {attacker_name} → {defender_name}", frozenset(), None
 
     attacker_label = f"{attacker_name} ({attacker_attack} Angriff)"
     if interrupted:
-        return f"{player_label}: {attacker_label} → {defender_name}", frozenset()
+        return f"{player_label}: {attacker_label} → {defender_name}", frozenset(), None
     health_before = before.get(defender.id, _NOT_TRACKED)[2]
     health_after = after.get(defender.id, _NOT_TRACKED)[2]
     headline = (
         f"{player_label}: {attacker_label} → {defender_name}: {health_before} → {health_after}"
     )
-    return headline, frozenset({defender.id})
+    hero_attack = HeroAttackDetail(
+        attacker_name=attacker_name,
+        defender_name=defender_name,
+        damage=attacker_attack,
+        health_before=health_before,
+        health_after=health_after,
+    )
+    return headline, frozenset({defender.id}), hero_attack
 
 
 def _target_suffix(
@@ -1053,7 +1086,7 @@ def _build_attack_action(
     # knowledge needed. A death mid-attack (e.g. trading into a bigger
     # minion) is a normal combat outcome and goes through the usual path.
     interrupted = after.get(block.entity, _NOT_TRACKED)[0] == Zone.HAND
-    headline, folded = _attack_headline(
+    headline, folded, hero_attack = _attack_headline(
         block, game, namer, friendly_player, before, after, interrupted
     )
     effects = _diff_effects(
@@ -1075,7 +1108,7 @@ def _build_attack_action(
             if defender is not None:
                 defender_name = namer.display_name(defender, friendly_player)
                 effects.append(f"{defender_name} nimmt keinen Kampfschaden")
-    return Action(headline=headline, effects=effects)
+    return Action(headline=headline, effects=effects, hero_attack=hero_attack)
 
 
 def _build_action(

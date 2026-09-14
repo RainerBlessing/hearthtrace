@@ -11,6 +11,7 @@ from hearthtrace.parser import (
     Action,
     BoardState,
     HandState,
+    HeroAttackDetail,
     LifeState,
     ManaState,
     MatchEnded,
@@ -296,6 +297,12 @@ def test_build_attack_action_narrates_a_secret_interrupted_attack() -> None:
         "Angriff abgebrochen",
         "Void Terror #1 nimmt keinen Kampfschaden",
     ]
+    # A minion-vs-minion attack (interrupted or not) never sets this --
+    # `_diff_effects` already carries both minions' stat changes in
+    # `effects` for that case; `hero_attack` exists only so the compact
+    # Replay UI can render a hero-target attack the same structured way
+    # without parsing its own headline sentence back apart.
+    assert action.hero_attack is None
 
 
 def test_generated_into_hand_line_does_not_leak_future_identity() -> None:
@@ -1158,6 +1165,15 @@ def test_parse_log_records_attack_action_against_hero_on_one_line() -> None:
 
     assert attack.headline == "Gegner: Elfenbogenschützin #1 (1 Angriff) → Dein Held: 29 → 28"
     assert attack.effects == []
+    # Same facts as the headline above, structured for the compact Replay
+    # UI (see `HeroAttackDetail`) rather than folded into one sentence.
+    assert attack.hero_attack == HeroAttackDetail(
+        attacker_name="Elfenbogenschützin #1",
+        defender_name="Dein Held",
+        damage=1,
+        health_before=29,
+        health_after=28,
+    )
 
 
 def test_parse_log_infers_opening_draw_from_hand_delta_not_as_an_action() -> None:
