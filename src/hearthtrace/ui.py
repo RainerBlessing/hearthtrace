@@ -1,6 +1,7 @@
 """The live deck-list window."""
 
 import sys
+import textwrap
 from html import escape
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from hearthtrace.match_history import (  # noqa: E402
     record_replay_source,
 )
 from hearthtrace.parser import (  # noqa: E402
+    Action,
     HandCard,
     MatchEnded,
     MinionState,
@@ -90,9 +92,24 @@ _REPLAY_STAGES = (_REPLAY_STAGE_START, _REPLAY_STAGE_ACTIONS, _REPLAY_STAGE_END)
 
 # UI-only relabeling for a minion-keyword chip's text -- purely cosmetic,
 # doesn't touch `parser.py`'s wording (also used, unchanged, by the
-# Markdown export). Only "kann angreifen" has a shorter, chip-friendly
-# alternative worth using; every other keyword is already short.
-_KEYWORD_CHIP_LABELS = {"kann angreifen": "bereit"}
+# Markdown export). "kann angreifen" gets a plain "●" dot rather than the
+# word "bereit": user feedback on a real screenshot -- it's shown on most
+# board rows (every minion that can act at all), so a compact glyph scans
+# faster there than the word does, and it's a proposed replacement of
+# their own. "nur Diener" deliberately keeps its word: it's the rarer,
+# less obvious case (Rush-restricted to minions only), where a second
+# unlabeled glyph next to the first would trade a small win in density for
+# a real loss in clarity.
+_KEYWORD_CHIP_LABELS = {"kann angreifen": "●"}
+
+# Temporary attack-readiness state ("can this minion attack right now, and
+# legally hit the enemy hero?"), as opposed to an actual printed card
+# keyword (Spott, Gottesschild, ...). User feedback on a real screenshot:
+# rendered as an identical bordered chip, "bereit" read as equally
+# important as "Spott" -- `_build_keyword_row` renders these as plain dim
+# text instead of a chip specifically because they're transient board
+# state, not a fact about the card.
+_STATE_KEYWORDS = frozenset({"kann angreifen", "nur Diener"})
 
 # Fixed width for a board minion's frame, so the board reads as a steady
 # grid instead of every box being exactly as wide as its own longest line
@@ -113,6 +130,44 @@ _CONTENT_MAX_WIDTH = 1100
 # the empty space from "around the card" to "inside the card, and below
 # it" instead of removing it.
 _TRACKER_MAX_WIDTH = 720
+
+# Below this window width, the Replay board switches from a card grid to
+# compact text rows (see `_build_board`/`_build_board_compact`). User
+# feedback on a real screenshot: at this app's normal (deliberately
+# narrow, so it fits comfortably next to Hearthstone or a terminal) width,
+# 6-7 minions in a 2-column card grid squeezed every card so narrow that
+# names like "Der Wirbelnde Nether" barely fit -- a real breakpoint,
+# switching the whole layout strategy rather than shrinking the same
+# layout further, keeps names fully readable at any width.
+_COMPACT_BOARD_WIDTH = 700
+
+# Caps a Replay Aktionen label's width (in characters, pre-wrapped via
+# `textwrap.fill` -- see `_build_wrapping_label`) so a long combined line
+# (a hero-attack's "Attacker → Defender", or an effect naming a long card)
+# actually wraps instead of overflowing the available width. Calibrated
+# empirically against this window's real content column width at each
+# size (~300px compact, ~700px wide inside `_ACTIONS_READING_COLUMN_WIDTH`):
+# bold ".heading" glyphs (the headline) are noticeably wider per character
+# than plain ".caption" ones (an effect line), so a single shared value
+# either wrapped headlines too late (overflowing) or effects too early
+# (choppier than the space in front of them actually needed) -- two
+# values per width, not one. User feedback: the wide view shouldn't need
+# to wrap most real headlines/effects at all -- its column is wide enough
+# that these two are generous ceilings, not an active constraint, the same
+# way `_COMPACT_BOARD_WIDTH`'s wide board grid isn't either.
+_ACTION_HEADLINE_MAX_WIDTH_CHARS_COMPACT = 36
+_ACTION_EFFECT_MAX_WIDTH_CHARS_COMPACT = 44
+_ACTION_HEADLINE_MAX_WIDTH_CHARS_WIDE = 80
+_ACTION_EFFECT_MAX_WIDTH_CHARS_WIDE = 95
+
+# A centered reading column for the Aktionen list specifically, narrower
+# than the other Replay stages' shared `_CONTENT_MAX_WIDTH` -- user
+# feedback: actions read like a log/document, not a dashboard, and a very
+# wide window just made each line harder to scan, not more useful. Doesn't
+# affect Start/Ende (their own board/hand content still uses the wider
+# clamp) since this wraps only the Aktionen list itself, and has no effect
+# at all in the compact view (the window is already narrower than this).
+_ACTIONS_READING_COLUMN_WIDTH = 750
 
 # Semantic Adwaita color classes for the match-status card's result dot --
 # "success"/"warning"/"error" are stock libadwaita style classes (like
@@ -144,7 +199,18 @@ _MATCH_END_REASON_TEXT: dict[tuple[str, str | None], str] = {
 # fixed size. Trimmed here rather than left at the library default; safe
 # to fail silently (an unmatched/ineffective rule just does nothing) if a
 # future libadwaita version restructures this internally.
-_REPLAY_CSS = "toggle-group toggle { padding-top: 2px; padding-bottom: 2px; }"
+#
+# `.tabular-nums` (`_build_board_compact`'s stats column): user feedback on
+# a real screenshot -- with the compact board's stats genuinely aligned
+# into one Gtk.Grid column, "6 / 12" and "0 / 1" still looked slightly
+# offset from each other, because ordinary proportional digits aren't all
+# the same width ("1" is narrower than "6"). OpenType tabular figures give
+# every digit the same advance width, so numbers in the same column truly
+# line up instead of just starting at the same x position.
+_REPLAY_CSS = (
+    "toggle-group toggle { padding-top: 2px; padding-bottom: 2px; }"
+    ' .tabular-nums { font-feature-settings: "tnum" 1; }'
+)
 
 
 def _install_replay_css() -> None:
@@ -180,6 +246,26 @@ def _tooltip_stats_line(info: CardInfo) -> str | None:
     if info.race_label:
         stats.append(info.race_label)
     return escape(" · ".join(stats)) if stats else None
+
+
+def _split_action_headline(headline: str, player_name: str) -> tuple[str, str | None]:
+    """UI-only display transform for the Aktionen renderer (both window
+    widths -- see `TrackerWindow._build_action_content`) -- never touches
+    `Action.headline` itself (shared with the Markdown export, which wants
+    the full sentence). Strips the leading "{player_name}: " (redundant
+    here: the page's own "Zug N – {player_name}" heading already says
+    whose turn it is), and -- when present -- moves " → Ziel: X" onto its
+    own line rather than letting it run on past the main sentence. Both
+    markers are ones `parser.py`'s own headline-building code always emits
+    verbatim, not free-form card text, so matching them exactly is safe.
+    """
+    prefix = f"{player_name}: "
+    text = headline[len(prefix) :] if headline.startswith(prefix) else headline
+    marker = " → Ziel: "
+    if marker not in text:
+        return text, None
+    main, _, target = text.partition(marker)
+    return main, f"→ Ziel: {target}"
 
 
 def _card_tooltip_markup(info: CardInfo) -> str:
@@ -275,6 +361,11 @@ class TrackerWindow(Adw.ApplicationWindow):
         # restore without waiting for the next poll tick.
         self._replay_source: tuple[Path, int] | None = None
         self._live_replay_game: ParsedGame | None = None
+        # Updated by the `Adw.Breakpoint` set up below, once the window is
+        # actually realized/sized -- `True` is the correct value up until
+        # then too, since `set_default_size` below (320px) is already
+        # narrower than `_COMPACT_BOARD_WIDTH`.
+        self._compact_board = True
 
         header_bar = Adw.HeaderBar()
         # Adw.ToggleGroup (libadwaita >=1.7): a real segmented control, not
@@ -315,6 +406,17 @@ class TrackerWindow(Adw.ApplicationWindow):
         history_scroller.set_child(self._clamp(self._history_list))
 
         replay_scroller = Gtk.ScrolledWindow()
+        # Gtk.ScrolledWindow's default policy is AUTOMATIC on *both* axes --
+        # found live in the compact Aktionen view: a wrapping label whose
+        # natural (unwrapped) width slightly exceeds the window's actual
+        # width doesn't get squeezed down and wrapped the way a fixed-size
+        # window would force it to; the scroller just lets it overflow
+        # sideways instead (invisibly, since there's no visible horizontal
+        # scrollbar to hint that's what happened). Forcing NEVER here means
+        # content always has to fit -- and therefore actually wrap -- within
+        # the window's own width, which is exactly what every wrapping
+        # label in this view already assumes.
+        replay_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         replay_scroller.set_child(self._clamp(self._build_replay_box()))
 
         self._stack = Gtk.Stack()
@@ -326,6 +428,19 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._stack.add_named(replay_scroller, "replay")
         toolbar_view.set_content(self._stack)
         self.set_content(toolbar_view)
+
+        # Drives `_compact_board` (see `_build_board`) off the window's
+        # actual current width rather than a size guessed once at startup
+        # -- this app is normally used docked narrow next to Hearthstone or
+        # a terminal, but resizing it wider should still switch the Replay
+        # board back to the full card grid, live, not just on the next
+        # poll tick.
+        board_breakpoint = Adw.Breakpoint.new(
+            Adw.BreakpointCondition.parse(f"max-width: {_COMPACT_BOARD_WIDTH - 1}px")
+        )
+        board_breakpoint.connect("apply", self._on_board_breakpoint_apply)
+        board_breakpoint.connect("unapply", self._on_board_breakpoint_unapply)
+        self.add_breakpoint(board_breakpoint)
 
         GLib.timeout_add_seconds(2, self._poll)
         # Deferred rather than shown right here: the window isn't presented
@@ -407,7 +522,12 @@ class TrackerWindow(Adw.ApplicationWindow):
 
         self._replay_position_label = Gtk.Label(label="")
         self._replay_position_label.add_css_class("caption")
-        self._replay_position_label.add_css_class("dim-label")
+        # Not the theme's own ".dim-label" (opacity ~0.55) -- user feedback
+        # on a real screenshot: "33 / 33" is relevant information while
+        # navigating (how far into the match this turn is), not filler
+        # text, and read as too faint at that opacity. A tick more visible,
+        # same convention already used for a Replay action's effect line.
+        self._replay_position_label.set_opacity(0.75)
         self._replay_position_label.set_halign(Gtk.Align.CENTER)
 
         self._replay_stage_group = Adw.ToggleGroup()
@@ -467,6 +587,14 @@ class TrackerWindow(Adw.ApplicationWindow):
         self.add_controller(key_controller)
 
         return replay_box
+
+    def _on_board_breakpoint_apply(self, _breakpoint: Adw.Breakpoint) -> None:
+        self._compact_board = True
+        self._refresh_replay_view()
+
+    def _on_board_breakpoint_unapply(self, _breakpoint: Adw.Breakpoint) -> None:
+        self._compact_board = False
+        self._refresh_replay_view()
 
     def _on_view_toggled(self, group: Adw.ToggleGroup, _pspec: GObject.ParamSpec) -> None:
         page_name = group.get_active_name()
@@ -698,7 +826,7 @@ class TrackerWindow(Adw.ApplicationWindow):
                 accent=False,
             )
         )
-        box.append(self._build_board_flowbox(snapshot.board.opponent))
+        box.append(self._build_board(snapshot.board.opponent))
         box.append(Gtk.Separator())
 
         own_header = self._build_side_header(
@@ -706,7 +834,22 @@ class TrackerWindow(Adw.ApplicationWindow):
         )
         own_header.set_margin_top(8)
         box.append(own_header)
-        box.append(self._build_board_flowbox(snapshot.board.own))
+        box.append(self._build_own_body(turn, snapshot))
+
+    def _build_own_body(self, turn: Turn, snapshot: TurnSnapshot) -> Gtk.Widget:
+        # User feedback on a real screenshot: an empty board followed by
+        # its own "Hand" heading plus a separate "(leer)" line read as two
+        # headings for nothing, with a lot of resulting blank space below
+        # DU once both were genuinely empty (late in a lost/won match) --
+        # one compact line says the same thing.
+        if not snapshot.board.own and not snapshot.hand.own_cards:
+            empty_label = Gtk.Label(label="Board leer · Hand leer", xalign=0)
+            empty_label.add_css_class("caption")
+            empty_label.add_css_class("dim-label")
+            return empty_label
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self._build_board(snapshot.board.own))
         if snapshot is turn.end:
             # User-requested review hint, generalized around
             # `MinionState.attacks_remaining` (not tailored to Windfury/
@@ -717,37 +860,48 @@ class TrackerWindow(Adw.ApplicationWindow):
             # anything yet -- the turn isn't over.
             unused_attack_hint = self._build_unused_attack_hint(snapshot.board.own)
             if unused_attack_hint is not None:
-                box.append(unused_attack_hint)
+                body.append(unused_attack_hint)
 
         hand_caption = Gtk.Label(label="Hand", xalign=0)
         hand_caption.add_css_class("caption")
         hand_caption.add_css_class("dim-label")
         hand_caption.set_margin_top(4)
-        box.append(hand_caption)
+        body.append(hand_caption)
         if snapshot.hand.own_cards:
-            box.append(self._build_hand_flowbox(snapshot.hand.own_cards))
+            body.append(self._build_hand(snapshot.hand.own_cards))
         else:
             empty_hand = Gtk.Label(label="(leer)", xalign=0)
             empty_hand.add_css_class("dim-label")
-            box.append(empty_hand)
+            body.append(empty_hand)
+        return body
 
     @staticmethod
     def _format_side_detail(hp: int, mana: str | None, hand_count: int | None) -> str:
         # Fixed labels ("Mana", "Hand") for every segment except HP's own
         # heart glyph, joined with one consistent separator -- so the line
         # reads as a small table of facts, not a string of differently-
-        # shaped tokens.
+        # shaped tokens. A bare 3-space gap (no visible separator) read as
+        # too dense on a narrow window per user feedback on a real
+        # screenshot -- a "·" between facts (matching `_tooltip_meta_line`'s
+        # own separator convention) breaks the line up without needing a
+        # narrower window to do it.
         parts = [f"♥ {hp}"]
         if mana is not None:
             parts.append(mana)
         if hand_count is not None:
             parts.append(f"Hand {hand_count}")
-        return "   ".join(parts)
+        return "   ·   ".join(parts)
 
     @staticmethod
     def _build_side_header(name: str, detail: str, *, accent: bool) -> Gtk.Box:
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         name_label = Gtk.Label(label=name, xalign=0)
+        # Fixed to "GEGNER"'s own length (the longer of the two side
+        # names): user feedback on a real screenshot -- "DU"'s short name
+        # left the detail line (♥/Mana/Hand) starting well left of where
+        # it starts on the GEGNER line above/below it, when both should
+        # read as the same kind of row.
+        name_label.set_width_chars(len("GEGNER"))
         name_label.add_css_class("heading")
         if accent:
             # A single subtle, theme-provided accent (Adwaita's semantic
@@ -760,81 +914,39 @@ class TrackerWindow(Adw.ApplicationWindow):
         detail_label.add_css_class("dim-label")
         row.append(name_label)
         row.append(detail_label)
+        # User feedback on a real screenshot: the board directly below sat
+        # right against this line with no breathing room at all, at odds
+        # with the actual separation between the GEGNER/DU sections.
+        row.set_margin_bottom(6)
         return row
 
     def _render_replay_actions(self, turn: Turn) -> None:
-        box = self._replay_content_box
+        # Everything below goes through one inner column, clamped to
+        # `_ACTIONS_READING_COLUMN_WIDTH` -- see that constant's own
+        # comment for why Aktionen specifically gets a narrower reading
+        # column than Start/Ende's board content.
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         if not turn.actions:
             placeholder = Gtk.Label(label="(keine Aktionen diesen Zug)", xalign=0)
             placeholder.add_css_class("dim-label")
-            box.append(placeholder)
+            column.append(placeholder)
+        total = len(turn.actions)
         for index, action in enumerate(turn.actions, start=1):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             row.set_valign(Gtk.Align.START)
             # Explicitly override this row's own expand flag rather than
             # leaving it computed: without this, the connector's own
             # vexpand below would propagate all the way up through row
-            # into `_replay_content_box`, which is exactly the "stretches
-            # across the whole page" bug fixed previously. Setting it here
-            # stops that propagation at the row boundary, so vexpand can
-            # still do its actual job -- filling *this row's own* height,
-            # which is however tall its `content` column naturally is --
-            # without also inflating the page.
+            # into `column`, which is exactly the "stretches across the
+            # whole page" bug fixed previously. Setting it here stops that
+            # propagation at the row boundary, so vexpand can still do its
+            # actual job -- filling *this row's own* height, which is
+            # however tall its `content` column naturally is -- without
+            # also inflating the page.
             row.set_vexpand(False)
-
-            number_label = Gtk.Label(label=str(index))
-            number_label.add_css_class("heading")
-            number_label.set_margin_top(2)
-            number_label.set_margin_bottom(2)
-            number_label.set_margin_start(6)
-            number_label.set_margin_end(6)
-            number_frame = Gtk.Frame()
-            number_frame.set_child(number_label)
-            number_frame.set_halign(Gtk.Align.CENTER)
-            number_frame.set_valign(Gtk.Align.START)
-
-            # A connector spanning down to the next badge, so the numbered
-            # list reads as one continuous sequence rather than separate
-            # unrelated rows -- its height follows the row's actual content
-            # height (vexpand, but scoped to this row only -- see above),
-            # not a fixed guess, so a multi-effect action's longer text
-            # doesn't leave the line stopping short of the next number.
-            badge_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-            badge_column.set_valign(Gtk.Align.FILL)
-            badge_column.append(number_frame)
-            if index < len(turn.actions):
-                connector = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-                # A vertical Box's child defaults to filling the column's
-                # full (perpendicular) width -- without an explicit narrow
-                # width and centered halign, this renders as a solid gray
-                # block as wide as the badge circle above it, not a thin
-                # connecting line.
-                connector.set_size_request(2, -1)
-                connector.set_halign(Gtk.Align.CENTER)
-                connector.set_vexpand(True)
-                connector.set_margin_top(4)
-                connector.set_margin_bottom(4)
-                badge_column.append(connector)
-
-            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            headline_label = Gtk.Label(label=action.headline, xalign=0)
-            headline_label.set_wrap(True)
-            content.append(headline_label)
-            for effect in action.effects:
-                effect_label = Gtk.Label(label=effect, xalign=0)
-                effect_label.set_wrap(True)
-                effect_label.add_css_class("caption")
-                # A tick lighter than the theme's own ".dim-label" (which
-                # reads as too dark for a secondary line at this size) --
-                # a plain opacity reduction instead of overriding that
-                # semantic class app-wide.
-                effect_label.set_opacity(0.75)
-                effect_label.set_margin_start(8)
-                content.append(effect_label)
-
-            row.append(badge_column)
-            row.append(content)
-            box.append(row)
+            row.append(self._build_action_badge_column(index, total))
+            row.append(self._build_action_content(action, turn))
+            column.append(row)
 
         game = self._replay_game
         if (
@@ -843,7 +955,158 @@ class TrackerWindow(Adw.ApplicationWindow):
             and game.turns
             and turn is game.turns[-1]
         ):
-            box.append(self._build_match_ended_block(game.match_ended))
+            column.append(self._build_match_ended_block(game.match_ended))
+
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(_ACTIONS_READING_COLUMN_WIDTH)
+        clamp.set_child(column)
+        self._replay_content_box.append(clamp)
+
+    @staticmethod
+    def _build_action_badge_column(index: int, total: int) -> Gtk.Box:
+        number_label = Gtk.Label(label=str(index))
+        number_label.add_css_class("heading")
+        number_label.set_margin_top(2)
+        number_label.set_margin_bottom(2)
+        number_label.set_margin_start(6)
+        number_label.set_margin_end(6)
+        number_frame = Gtk.Frame()
+        number_frame.set_child(number_label)
+        number_frame.set_halign(Gtk.Align.CENTER)
+        number_frame.set_valign(Gtk.Align.START)
+
+        # A connector spanning down to the next badge, so the numbered
+        # list reads as one continuous sequence rather than separate
+        # unrelated rows -- its height follows the row's actual content
+        # height (vexpand, but scoped to this row only -- see
+        # `_render_replay_actions`'s own comment), not a fixed guess, so a
+        # multi-effect action's longer text doesn't leave the line
+        # stopping short of the next number.
+        badge_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        badge_column.set_valign(Gtk.Align.FILL)
+        badge_column.append(number_frame)
+        if index < total:
+            connector = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+            # A vertical Box's child defaults to filling the column's full
+            # (perpendicular) width -- without an explicit narrow width and
+            # centered halign, this renders as a solid gray block as wide
+            # as the badge circle above it, not a thin connecting line.
+            connector.set_size_request(2, -1)
+            connector.set_halign(Gtk.Align.CENTER)
+            connector.set_vexpand(True)
+            connector.set_margin_top(4)
+            connector.set_margin_bottom(4)
+            badge_column.append(connector)
+        return badge_column
+
+    @staticmethod
+    def _build_wrapping_label(text: str, *, max_chars: int) -> Gtk.Label:
+        # `wrap=True` alone isn't enough -- found live in the compact
+        # Aktionen view: a long combined action line (e.g. an attacker's
+        # and a defender's name both in one headline) ran right off the
+        # window's actual edge instead of wrapping. Root cause: a
+        # Gtk.Label's *natural* width (what it reports wanting, before any
+        # wrapping) is its full unwrapped single-line width, and nothing
+        # in this view's container chain (Gtk.ScrolledWindow, Adw.Clamp)
+        # forces a child down to less than its own natural width -- both
+        # exist to cap an *upper* bound or allow scrolling past a lower
+        # one, not to shrink content that wants to be wider than the
+        # window. `set_max_width_chars` alone didn't change that in
+        # practice either. Pre-breaking the text ourselves with
+        # `textwrap.fill` sidesteps the whole question: the label's own
+        # natural width is then only ever as wide as its longest already-
+        # broken line, which does fit. `max_chars` is a call-site choice
+        # rather than one shared value, since a bold ".heading" line and a
+        # plain ".caption" one fit meaningfully different character counts
+        # in the same pixel width.
+        label = Gtk.Label(label=textwrap.fill(text, width=max_chars), xalign=0)
+        label.set_wrap(True)
+        return label
+
+    def _action_headline_max_chars(self) -> int:
+        return (
+            _ACTION_HEADLINE_MAX_WIDTH_CHARS_COMPACT
+            if self._compact_board
+            else _ACTION_HEADLINE_MAX_WIDTH_CHARS_WIDE
+        )
+
+    def _action_effect_max_chars(self) -> int:
+        return (
+            _ACTION_EFFECT_MAX_WIDTH_CHARS_COMPACT
+            if self._compact_board
+            else _ACTION_EFFECT_MAX_WIDTH_CHARS_WIDE
+        )
+
+    def _build_action_effect_label(self, text: str) -> Gtk.Label:
+        effect_label = self._build_wrapping_label(text, max_chars=self._action_effect_max_chars())
+        effect_label.add_css_class("caption")
+        # A tick lighter than the theme's own ".dim-label" (which reads as
+        # too dark for a secondary line at this size) -- a plain opacity
+        # reduction instead of overriding that semantic class app-wide.
+        effect_label.set_opacity(0.75)
+        return effect_label
+
+    def _build_action_content(self, action: Action, turn: Turn) -> Gtk.Box:
+        """One content renderer for a Replay action, used at every window
+        width. User feedback on a real screenshot: the wide and compact
+        Aktionen views had drifted into two different information
+        hierarchies -- a repeated "Gegner: "/"Du: " on every line (already
+        said once by the page's own "Zug N - Gegner" heading), a target/
+        cost folded into the headline sentence, effects reading as
+        appended prose rather than a distinct group -- instead of the same
+        semantics at two sizes. Responsive only changes layout knobs here
+        (wrap width via `_action_headline_max_chars`/
+        `_action_effect_max_chars`), never the structure itself.
+        """
+        action_lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        effects = action.effects
+
+        if action.hero_attack is not None:
+            # `Action.headline` folds this into one sentence with the
+            # damage number inline (for the Markdown export) -- `hero_attack`
+            # carries the same facts already split apart, so this doesn't
+            # need to parse that sentence back out.
+            detail = action.hero_attack
+            headline_label = self._build_wrapping_label(
+                f"{detail.attacker_name} → {detail.defender_name}",
+                max_chars=self._action_headline_max_chars(),
+            )
+            headline_label.add_css_class("heading")
+            action_lines.append(headline_label)
+            effects = [
+                f"{detail.damage} Schaden · {detail.health_before} → {detail.health_after}",
+                *action.effects,
+            ]
+        else:
+            main_text, target_text = _split_action_headline(action.headline, turn.player_name)
+            headline_label = self._build_wrapping_label(
+                main_text, max_chars=self._action_headline_max_chars()
+            )
+            headline_label.add_css_class("heading")
+            action_lines.append(headline_label)
+            if target_text is not None:
+                action_lines.append(
+                    self._build_wrapping_label(
+                        target_text, max_chars=self._action_effect_max_chars()
+                    )
+                )
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        content.append(action_lines)
+        if effects:
+            # Its own tightly-spaced group, one notch further indented and
+            # set apart from `action_lines` above by `content`'s own wider
+            # spacing -- user feedback: without a clearer gap here, an
+            # action's results and the next action's headline read as one
+            # undifferentiated block instead of visually distinct groups.
+            effects_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            effects_box.set_margin_start(8)
+            for effect in effects:
+                effects_box.append(self._build_action_effect_label(effect))
+            content.append(effects_box)
+
+        content.set_margin_bottom(6)
+        return content
 
     @staticmethod
     def _build_match_ended_block(match_ended: MatchEnded) -> Gtk.Box:
@@ -896,7 +1159,16 @@ class TrackerWindow(Adw.ApplicationWindow):
         hint.set_margin_top(4)
         return hint
 
-    def _build_board_flowbox(self, minions: list[MinionState]) -> Gtk.FlowBox:
+    def _build_board(self, minions: list[MinionState]) -> Gtk.Widget:
+        """Dispatches between the two Replay board layouts (see
+        `_COMPACT_BOARD_WIDTH`) -- never both at once, and never a shrunk
+        version of the other; the two are different layout strategies for
+        the same data, not the same layout at two sizes."""
+        if self._compact_board:
+            return self._build_board_compact(minions)
+        return self._build_board_grid(minions)
+
+    def _build_board_grid(self, minions: list[MinionState]) -> Gtk.FlowBox:
         flow = Gtk.FlowBox()
         flow.set_selection_mode(Gtk.SelectionMode.NONE)
         flow.set_min_children_per_line(1)
@@ -904,6 +1176,49 @@ class TrackerWindow(Adw.ApplicationWindow):
         for minion in minions:
             flow.append(self._build_minion_frame(minion))
         return flow
+
+    def _build_board_compact(self, minions: list[MinionState]) -> Gtk.Grid:
+        # User feedback on a real screenshot: at this window's normal
+        # width, `_build_board_grid`'s 2-column card grid squeezed 6-7
+        # minions so narrow that names barely fit. One row per minion
+        # (name, stats, keywords, left to right) reads as a small table
+        # instead -- more information-dense, and every name stays fully
+        # readable regardless of how many minions are on the board.
+        #
+        # A Gtk.Grid, not a Box per row: follow-up feedback on that same
+        # table -- stats/keywords should sit at the same horizontal
+        # position regardless of how long each row's own name happens to
+        # be. A Grid's columns each size themselves to the widest cell in
+        # that column across *every* row attached to it, which independent
+        # per-row Boxes can't do on their own.
+        grid = Gtk.Grid()
+        grid.set_row_spacing(6)
+        grid.set_column_spacing(8)
+        for row_index, minion in enumerate(minions):
+            # Deliberately *not* `name_label.set_hexpand(True)`: a wrapping
+            # label's natural width collapses toward its minimum once
+            # hexpand lets it, which previously under-reported this grid's
+            # actual natural width to the window -- it opened too narrow
+            # for its own content, clipping stats/keywords off the right
+            # edge instead of wrapping them. Each column sizing itself off
+            # the cells' own natural (unwrapped) width avoids that; `wrap`
+            # stays on purely as a safety net for a name genuinely too long
+            # for the available space.
+            name_label = Gtk.Label(label=minion.name, xalign=0)
+            name_label.set_wrap(True)
+            grid.attach(name_label, 0, row_index, 1, 1)
+
+            stats_label = Gtk.Label(label=f"{minion.attack} / {minion.health}", xalign=0)
+            stats_label.add_css_class("heading")
+            stats_label.add_css_class("tabular-nums")
+            grid.attach(stats_label, 1, row_index, 1, 1)
+
+            keyword_row = self._build_keyword_row(minion.keywords)
+            if keyword_row is not None:
+                grid.attach(keyword_row, 2, row_index, 1, 1)
+
+            self._attach_card_tooltip(name_label, minion.card_id, minion.script_data_num_1)
+        return grid
 
     def _build_minion_frame(self, minion: MinionState) -> Gtk.Frame:
         # Name/stats/keywords deliberately don't share one font size: the
@@ -924,19 +1239,9 @@ class TrackerWindow(Adw.ApplicationWindow):
         stats_label.add_css_class("title-3")
         content.append(stats_label)
 
-        if minion.keywords:
-            chip_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-            chip_row.set_halign(Gtk.Align.CENTER)
-            for keyword in minion.keywords:
-                chip_text = _KEYWORD_CHIP_LABELS.get(keyword, keyword)
-                # "bereit"/"nur Diener" are temporary state indicators (can
-                # this minion attack right now, and legally hit the enemy
-                # hero?), not printed card keywords like "Spott" -- user
-                # feedback: they read as equally important as a real
-                # keyword, deliberately muted here instead.
-                muted = keyword in ("kann angreifen", "nur Diener")
-                chip_row.append(TrackerWindow._build_keyword_chip(chip_text, muted=muted))
-            content.append(chip_row)
+        keyword_row = self._build_keyword_row(minion.keywords, halign=Gtk.Align.CENTER)
+        if keyword_row is not None:
+            content.append(keyword_row)
 
         for setter in (
             content.set_margin_top,
@@ -958,6 +1263,48 @@ class TrackerWindow(Adw.ApplicationWindow):
         self._attach_card_tooltip(frame, minion.card_id, minion.script_data_num_1)
         return frame
 
+    def _build_hand(self, cards: list[HandCard]) -> Gtk.Widget:
+        """Same layout split as `_build_board`: below `_COMPACT_BOARD_WIDTH`
+        the two-column pill-chip grid is exactly the "cards too narrow"
+        problem the board already had -- worse here, since a hand name is
+        typically longer than a minion's. A plain list reads fine at any
+        width instead."""
+        if self._compact_board:
+            return self._build_hand_list(cards)
+        return self._build_hand_flowbox(cards)
+
+    def _build_hand_list(self, cards: list[HandCard]) -> Gtk.Grid:
+        # Same reasoning as `_build_board_compact`'s Grid: a mana-cost
+        # column (when resolvable) should sit at one consistent horizontal
+        # position, not directly after each card's own differently-long
+        # name.
+        grid = Gtk.Grid()
+        grid.set_row_spacing(4)
+        grid.set_column_spacing(8)
+        for row_index, card in enumerate(cards):
+            name_label = Gtk.Label(label=card.name, xalign=0)
+            name_label.set_wrap(True)
+            grid.attach(name_label, 0, row_index, 1, 1)
+
+            cost = self._hand_card_cost(card.card_id)
+            if cost is not None:
+                cost_label = Gtk.Label(label=str(cost), xalign=1)
+                cost_label.add_css_class("dim-label")
+                grid.attach(cost_label, 1, row_index, 1, 1)
+
+            self._attach_card_tooltip(name_label, card.card_id)
+        return grid
+
+    def _hand_card_cost(self, card_id: str) -> int | None:
+        # Printed base cost only (no entity-specific cost-reduction tags,
+        # unlike the board's `script_data_num_1` variant text) -- the same
+        # tradeoff `_attach_card_tooltip`'s own cost line already makes for
+        # a hand card, just surfaced as its own column here instead of
+        # buried in the tooltip.
+        if not card_id:
+            return None
+        return card_info(card_id, self._card_db).cost
+
     def _build_hand_flowbox(self, cards: list[HandCard]) -> Gtk.FlowBox:
         flow = Gtk.FlowBox()
         flow.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -978,7 +1325,7 @@ class TrackerWindow(Adw.ApplicationWindow):
         return frame
 
     @staticmethod
-    def _build_keyword_chip(text: str, *, muted: bool = False) -> Gtk.Frame:
+    def _build_keyword_chip(text: str) -> Gtk.Frame:
         label = Gtk.Label(label=text)
         label.add_css_class("caption")
         label.set_margin_top(0)
@@ -991,9 +1338,37 @@ class TrackerWindow(Adw.ApplicationWindow):
         # chips) or box (keyword row) would otherwise stretch this to fill
         # leftover space in a sparse row/hand instead of sizing to content.
         frame.set_halign(Gtk.Align.START)
-        if muted:
-            frame.set_opacity(0.6)
         return frame
+
+    @staticmethod
+    def _build_keyword_row(
+        keywords: list[str], *, halign: Gtk.Align = Gtk.Align.START
+    ) -> Gtk.Box | None:
+        """Splits a minion's keywords into real, printed card keywords
+        (Spott, Gottesschild, ...), shown as bordered chips, and temporary
+        attack-readiness state (`_STATE_KEYWORDS` -- "bereit"/"nur
+        Diener"), shown as plain dim text instead. User feedback on a real
+        screenshot: as identical bordered chips, "bereit" read as equally
+        important as "Spott" even though it isn't a fact about the card,
+        just this instant's board state.
+        """
+        if not keywords:
+            return None
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        row.set_halign(halign)
+        state_labels = []
+        for keyword in keywords:
+            chip_text = _KEYWORD_CHIP_LABELS.get(keyword, keyword)
+            if keyword in _STATE_KEYWORDS:
+                state_labels.append(chip_text)
+            else:
+                row.append(TrackerWindow._build_keyword_chip(chip_text))
+        if state_labels:
+            state_label = Gtk.Label(label=" · ".join(state_labels))
+            state_label.add_css_class("caption")
+            state_label.add_css_class("dim-label")
+            row.append(state_label)
+        return row
 
     def _attach_card_tooltip(
         self, widget: Gtk.Widget, card_id: str, script_data_num_1: int = 0
@@ -1167,25 +1542,17 @@ class TrackerWindow(Adw.ApplicationWindow):
     def _build_match_status_card(
         self, own_class: str, opponent_class: str, detail_text: str, result: str | None
     ) -> Gtk.Box:
-        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        card.add_css_class("card")
-
-        text_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        text_column.set_margin_top(12)
-        text_column.set_margin_bottom(12)
-        text_column.set_margin_start(12)
-        text_column.set_margin_end(12)
-        text_column.set_hexpand(True)
-        card.append(text_column)
-
-        heading = Gtk.Label(label="Aktuelle Partie", xalign=0)
+        # "Aktuelle Partie" only while Hearthstone is actually still
+        # running this match -- user feedback on a real screenshot: once
+        # it's over (`result` is set), the card is showing a finished
+        # result, not something ongoing, and "Letzte Partie" says that.
+        heading_text = "Aktuelle Partie" if result is None else "Letzte Partie"
+        heading = Gtk.Label(label=heading_text, xalign=0)
         heading.add_css_class("caption")
         heading.add_css_class("dim-label")
-        text_column.append(heading)
 
         matchup = Gtk.Label(label=f"{own_class} vs. {opponent_class}", xalign=0)
         matchup.add_css_class("title-4")
-        text_column.append(matchup)
 
         detail_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         if result is not None:
@@ -1196,14 +1563,51 @@ class TrackerWindow(Adw.ApplicationWindow):
         detail = Gtk.Label(label=detail_text, xalign=0)
         detail.add_css_class("dim-label")
         detail_row.append(detail)
+
+        text_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        text_column.append(heading)
+        text_column.append(matchup)
         text_column.append(detail_row)
 
+        replay_button = None
         if result is not None:
             replay_button = Gtk.Button(label="Replay ansehen")
+            replay_button.connect("clicked", self._on_view_finished_replay)
+
+        # User feedback on a real screenshot: at this window's normal
+        # (narrow) width, the title, result and "Replay ansehen" button
+        # all competed for the same horizontal line and the button ran
+        # off the window's edge. Stacking the button below the summary
+        # instead -- full width, easy to hit -- rather than squeezing it
+        # into that one crowded row.
+        if self._compact_board:
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            card.add_css_class("card")
+            for setter in (
+                card.set_margin_top,
+                card.set_margin_bottom,
+                card.set_margin_start,
+                card.set_margin_end,
+            ):
+                setter(12)
+            card.append(text_column)
+            if replay_button is not None:
+                replay_button.set_hexpand(True)
+                card.append(replay_button)
+            return card
+
+        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        card.add_css_class("card")
+        text_column.set_margin_top(12)
+        text_column.set_margin_bottom(12)
+        text_column.set_margin_start(12)
+        text_column.set_margin_end(12)
+        text_column.set_hexpand(True)
+        card.append(text_column)
+        if replay_button is not None:
             replay_button.set_valign(Gtk.Align.END)
             replay_button.set_margin_end(12)
             replay_button.set_margin_bottom(12)
-            replay_button.connect("clicked", self._on_view_finished_replay)
             card.append(replay_button)
         return card
 
