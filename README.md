@@ -18,7 +18,13 @@ Markdown for further analysis.
 > Brawl are not yet supported. The app's own UI text (and its Markdown
 > export) is German.
 
-<!-- TODO: screenshot or short GIF of the Replay view goes here -->
+<table>
+<tr>
+<td align="center" width="33%"><img src="docs/screenshots/replay-start.png" alt="Replay Start stage: opponent board"><br><sub>Start</sub></td>
+<td align="center" width="33%"><img src="docs/screenshots/replay-actions.png" alt="Replay Actions stage: action log and match-end summary"><br><sub>Actions</sub></td>
+<td align="center" width="33%"><img src="docs/screenshots/replay-end.png" alt="Replay End stage: closing board and life totals"><br><sub>End</sub></td>
+</tr>
+</table>
 
 ## Why HearthTrace?
 
